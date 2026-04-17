@@ -1,0 +1,16 @@
+menu "SmartPlug Configuration"
+
+    choice SMARTPLUG_BOARD_PROFILE
+        prompt "Board profile"
+        default SMARTPLUG_BOARD_PROFILE_DEVKITC1
+        help
+            Select the hardware profile used for pin mapping.
+
+        config SMARTPLUG_BOARD_PROFILE_DEVKITC1
+            bool "ESP32-S3-DevKitC-1 (development)"
+
+        config SMARTPLUG_BOARD_PROFILE_CUSTOM_PCB
+            bool "SmartPlug custom PCB"
+    endchoice
+
+endmenu
