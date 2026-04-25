@@ -5,6 +5,7 @@
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "driver/spi_common.h"
+#include "driver/uart.h"
 
 typedef struct {
     gpio_num_t relay_gpio;
@@ -21,13 +22,12 @@ typedef struct {
     gpio_num_t sd_sclk_gpio;
     gpio_num_t sd_miso_gpio;
 
-    spi_host_device_t ade_spi_host;
-    gpio_num_t ade_cs_gpio;
-    gpio_num_t ade_mosi_gpio;
-    gpio_num_t ade_sclk_gpio;
-    gpio_num_t ade_miso_gpio;
-    gpio_num_t ade_reset_gpio;
-    gpio_num_t ade_irq_gpio;
+    uart_port_t pzem_uart_port;
+    gpio_num_t pzem_tx_gpio;
+    gpio_num_t pzem_rx_gpio;
+    gpio_num_t pzem_dir_gpio;
+    uint32_t pzem_uart_baud_rate;
+    uint8_t pzem_default_slave_addr;
 } smartplug_board_pins_t;
 
 const smartplug_board_pins_t *smartplug_board_pins_get(void);

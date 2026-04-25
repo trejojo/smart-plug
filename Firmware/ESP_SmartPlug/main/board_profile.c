@@ -14,15 +14,12 @@ static const smartplug_board_pins_t s_devkit_pins = {
     .sd_mosi_gpio = GPIO_NUM_5,
     .sd_sclk_gpio = GPIO_NUM_6,
     .sd_miso_gpio = GPIO_NUM_7,
-    /*
-    .ade_spi_host = SPI2_HOST,
-    .ade_cs_gpio = GPIO_NUM_10,
-    .ade_mosi_gpio = GPIO_NUM_11,
-    .ade_sclk_gpio = GPIO_NUM_12,
-    .ade_miso_gpio = GPIO_NUM_13,
-    .ade_reset_gpio = GPIO_NUM_14,
-    .ade_irq_gpio = GPIO_NUM_21,
-    */
+    .pzem_uart_port = UART_NUM_1,
+    .pzem_tx_gpio = GPIO_NUM_16,
+    .pzem_rx_gpio = GPIO_NUM_15,
+    .pzem_dir_gpio = GPIO_NUM_NC,
+    .pzem_uart_baud_rate = 9600,
+    .pzem_default_slave_addr = 0x01,
 };
 
 __attribute__((unused)) static const smartplug_board_pins_t s_custom_pcb_pins = {
@@ -37,6 +34,13 @@ __attribute__((unused)) static const smartplug_board_pins_t s_custom_pcb_pins = 
     .sd_mosi_gpio = GPIO_NUM_5,
     .sd_sclk_gpio = GPIO_NUM_6,
     .sd_miso_gpio = GPIO_NUM_7,
+    .pzem_uart_port = UART_NUM_1,
+    .pzem_tx_gpio = GPIO_NUM_11,
+    .pzem_rx_gpio = GPIO_NUM_13,
+    .pzem_dir_gpio = GPIO_NUM_NC,
+    .pzem_uart_baud_rate = 9600,
+    .pzem_default_slave_addr = 0x01,
+    /*
     .ade_spi_host = SPI2_HOST,
     .ade_cs_gpio = GPIO_NUM_10,
     .ade_mosi_gpio = GPIO_NUM_11,
@@ -44,6 +48,7 @@ __attribute__((unused)) static const smartplug_board_pins_t s_custom_pcb_pins = 
     .ade_miso_gpio = GPIO_NUM_13,
     .ade_reset_gpio = GPIO_NUM_14,
     .ade_irq_gpio = GPIO_NUM_21,
+    */
 };
 
 const smartplug_board_pins_t *smartplug_board_pins_get(void)

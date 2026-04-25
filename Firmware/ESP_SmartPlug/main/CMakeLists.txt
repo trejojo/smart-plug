@@ -1,7 +1,9 @@
 idf_component_register(SRCS "main.c"
                     "board_profile.c"
-                    "module_baseline_io.c"
+                    "module_relay.c"
+                    "module_ledstrip.c"
                     "module_sdcard.c"
                     "module_tmp102.c"
+                    "module_pzem.c"
                     INCLUDE_DIRS "."
-                    PRIV_REQUIRES led_strip fatfs sdmmc vfs)
+                    PRIV_REQUIRES led_strip fatfs sdmmc vfs pzem-driver)
