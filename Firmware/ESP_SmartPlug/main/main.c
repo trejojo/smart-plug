@@ -9,6 +9,8 @@
 #include "module_ledstrip.h"
 #include "module_pzem.h"
 #include "module_tmp102.h"
+#include "module_ble.h"
+#include "module_nvs.h"
 
 static const char *TAG = "smartplug";
 
@@ -20,6 +22,8 @@ void app_main(void)
 	// Log the board profile name and pin configuration
 	esp_log_level_set("smartplug", ESP_LOG_INFO);
 	ESP_LOGI(TAG, "SmartPlug Module 1 boot (%s)", smartplug_board_profile_name());
+	
+	/* Initialize core modules */
 	ESP_ERROR_CHECK(module_relay_init());
 	ESP_ERROR_CHECK(module_ledstrip_init());
 	ESP_ERROR_CHECK(module_tmp102_init());
@@ -28,8 +32,35 @@ void app_main(void)
 	ESP_LOGI(TAG, "RGB LED on GPIO %d initialized", pins->rgb_led_gpio);
 	ESP_LOGI(TAG, "PZEM-004T Modbus interface initialized");
 	ESP_LOGI(TAG, "Native USB console depends on menuconfig: enable USB CDC console if required");
+	
+	/* Initialize NVS and BLE for credential provisioning */
+	ESP_ERROR_CHECK(module_nvs_init());
+	ESP_ERROR_CHECK(module_ble_init());
+	
+	/* Check if WiFi credentials exist in NVS */
+	if (!module_nvs_credentials_exist()) {
+		ESP_LOGW(TAG, "No WiFi credentials found, starting BLE advertising for provisioning");
+		ESP_ERROR_CHECK(module_ble_start_advertising());
+	} else {
+		ESP_LOGI(TAG, "WiFi credentials found in NVS");
+		char ssid[33], password[65];
+		if (module_nvs_get_ssid(ssid) == ESP_OK && module_nvs_get_password(password) == ESP_OK) {
+			ESP_LOGI(TAG, "SSID: %s (will connect to WiFi)", ssid);
+		}
+	}
 
 	while (true) {
+		/* Check if credentials were received via BLE */
+		if (module_ble_credentials_received()) {
+			char ssid[33], password[65];
+			if (module_ble_get_ssid(ssid) == ESP_OK && module_ble_get_password(password) == ESP_OK) {
+				ESP_LOGI(TAG, "Credentials received via BLE, saving to NVS (SSID: %s)", ssid);
+				ESP_ERROR_CHECK(module_nvs_save_wifi_credentials(ssid, password));
+				ESP_ERROR_CHECK(module_ble_stop_advertising());
+				module_ble_reset_credentials();
+			}
+		}
+		
 		float temperature_c;
 		esp_err_t ret = module_tmp102_read_celsius(&temperature_c);
 		if (ret == ESP_OK) {

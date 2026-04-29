@@ -5,5 +5,7 @@ idf_component_register(SRCS "main.c"
                     "module_sdcard.c"
                     "module_tmp102.c"
                     "module_pzem.c"
+                    "module_ble.c"
+                    "module_nvs.c"
                     INCLUDE_DIRS "."
-                    PRIV_REQUIRES led_strip fatfs sdmmc vfs pzem-driver)
+                    PRIV_REQUIRES led_strip fatfs sdmmc vfs pzem-driver bt nvs_flash)
