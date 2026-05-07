@@ -13,45 +13,56 @@ DEVICE_NAME = "SmartPlug"
 async def main():
     print(f"--- Searching for {DEVICE_NAME}... ---")
     
-    # 1. Scan for BLE devices
-    device = await BleakScanner.find_device_by_filter(
-        lambda d, ad: d.name == DEVICE_NAME
-    )
-
-    if not device:
-        print("❌ SmartPlug not found. Is it powered on and in BLE mode?")
+    # 1. Scan for BLE devices (with 15-second timeout)
+    try:
+        device = await asyncio.wait_for(
+            BleakScanner.find_device_by_filter(
+                lambda d, ad: d.name == DEVICE_NAME
+            ),
+            timeout=15.0
+        )
+    except asyncio.TimeoutError:
+        print(f"Scan timeout: {DEVICE_NAME} not found within 15 seconds.")
+        print("   Is the ESP32 powered on and advertising?")
         return
 
-    print(f"✅ Found: {device.address}. Connecting...")
+    if not device:
+        print(f"{DEVICE_NAME} not found in scan results")
+        return
+
+    print(f"Found: {device.address}. Connecting...")
 
     # 2. Connect and send provisioning data
     try:
         async with BleakClient(device) as client:
-            print("🔗 Connected!")
+            print("Connected!")
 
             # Verify that the expected provisioning service is present
             services = await client.get_services()
             available_service_uuids = {service.uuid.lower() for service in services}
             if SERVICE_UUID.lower() not in available_service_uuids:
-                print("💥 Expected provisioning service UUID not found on this device.")
+                print(f"   Service UUID {SERVICE_UUID} not found on device.")
+                print(f"   Available services: {available_service_uuids}")
                 return
 
             # Hotspot credentials (replace with real values)
             wifi_credentials = {
-                "ssid": "Your_Hotspot_Name",
-                "password": "Your_Password_123"
+                "ssid": "Your_Hotspot_Name", # Replace with your actual hotspot SSID
+                "password": "Your_Password_123" # Replace with your actual hotspot password 
             }
             
             # Convert dictionary to JSON string and then to bytes
             payload = json.dumps(wifi_credentials).encode('utf-8')
 
-            print(f"📤 Sending credentials: {wifi_credentials}")
+            print(f" Sending credentials: {wifi_credentials}")
             await client.write_gatt_char(CHAR_UUID_JSON, payload)
             
-            print("🚀 Credentials sent successfully. ESP32 should now restart Wi-Fi.")
+            print(" Credentials sent successfully. ESP32 should now restart Wi-Fi.")
             
+    except asyncio.TimeoutError:
+        print(f"Connection timeout. Device may have disconnected.")
     except Exception as e:
-        print(f"💥 Connection error: {e}")
+        print(f"Connection error: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
