@@ -10,6 +10,7 @@
 #include "module_pzem.h"
 #include "module_tmp102.h"
 #include "module_ble.h"
+#include "module_wifi.h"
 #include "module_nvs.h"
 
 static const char *TAG = "smartplug";
@@ -36,6 +37,7 @@ void app_main(void)
 	/* Initialize NVS and BLE for credential provisioning */
 	ESP_ERROR_CHECK(module_nvs_init());
 	ESP_ERROR_CHECK(module_ble_init());
+	ESP_ERROR_CHECK(module_wifi_init());
 	
 	/* Check if WiFi credentials exist in NVS */
 	if (!module_nvs_credentials_exist()) {
@@ -46,6 +48,7 @@ void app_main(void)
 		char ssid[33], password[65];
 		if (module_nvs_get_ssid(ssid) == ESP_OK && module_nvs_get_password(password) == ESP_OK) {
 			ESP_LOGI(TAG, "SSID: %s (will connect to WiFi)", ssid);
+			ESP_ERROR_CHECK(module_wifi_connect(ssid, password));
 		}
 	}
 
@@ -57,6 +60,7 @@ void app_main(void)
 				ESP_LOGI(TAG, "Credentials received via BLE, saving to NVS (SSID: %s)", ssid);
 				ESP_ERROR_CHECK(module_nvs_save_wifi_credentials(ssid, password));
 				ESP_ERROR_CHECK(module_ble_stop_advertising());
+				ESP_ERROR_CHECK(module_wifi_connect(ssid, password));
 				module_ble_reset_credentials();
 			}
 		}

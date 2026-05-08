@@ -26,17 +26,14 @@
     0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78, \
     0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0
 
-#define CREDS_SSID_CHAR_UUID \
+#define CREDS_JSON_CHAR_UUID \
     0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78, \
     0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1
 
-#define CREDS_PASSWORD_CHAR_UUID \
-    0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78, \
-    0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf2
-
-/* Maximum credential lengths */
+/* Maximum credential lengths and JSON buffer */
 #define MAX_SSID_LEN 32
 #define MAX_PASSWORD_LEN 64
+#define MAX_JSON_LEN 256
 
 /**
  * @brief Initialize BLE module
@@ -66,9 +63,9 @@ esp_err_t module_ble_start_advertising(void);
 esp_err_t module_ble_stop_advertising(void);
 
 /**
- * @brief Check if credentials were received via BLE
+ * @brief Check if credentials were received via BLE (JSON parsed successfully)
  * 
- * @return true if both SSID and password have been written, false otherwise
+ * @return true if JSON credentials have been received and parsed, false otherwise
  */
 bool module_ble_credentials_received(void);
 
