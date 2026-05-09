@@ -39,7 +39,7 @@ async def main():
             print("Connected!")
 
             # Verify that the expected provisioning service is present
-            services = await client.get_services()
+            services = client.services
             available_service_uuids = {service.uuid.lower() for service in services}
             if SERVICE_UUID.lower() not in available_service_uuids:
                 print(f"   Service UUID {SERVICE_UUID} not found on device.")
