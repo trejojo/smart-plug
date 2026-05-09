@@ -97,11 +97,76 @@ python provisioning/provisioner.py
 
 ### Troubleshooting
 
-1. SmartPlug not found: Check if the ESP32 is powered and advertising BLE.
+- **SmartPlug not found:** Check if the ESP32 is powered and advertising BLE.
 
-2. Connection timeout: The device may have disconnected. Try again.
+- **Connection timeout:** The device may have disconnected. Try again.
 
-3. Service UUID not found: Firmware and client UUID definitions may be mismatched.
+- **Service UUID not found:** Firmware and client UUID definitions may be mismatched.
+
+---
+
+## 4. MQTT Broker & Telemetry Setup
+
+After the ESP32 is provisioned and connected to Wi-Fi, it can send telemetry data via MQTT to your PC.
+
+### A. Install Mosquitto MQTT Broker (Windows)
+
+1. Download Mosquitto from: https://mosquitto.org/download/
+2. Run the installer (choose default options)
+3. During installation, Mosquitto will be registered as a Windows Service
+
+### B. Configure Mosquitto
+
+1. Locate the configuration file:
+   - Default path: `C:\Program Files\mosquitto\mosquitto.conf`
+
+2. Replace its contents with the configuration from `mosquitto.conf` in this repository, or manually add:
+
+   ```conf
+   listener 1883
+   allow_anonymous true
+   ```
+
+3. Save the file
+
+### C. Start the MQTT Broker
+
+**Option 1: Using Windows Services (Recommended)**
+- Open `Services.msc`
+- Find "Mosquitto Broker"
+- Click "Start" (or set to auto-start)
+
+**Option 2: Command Line**
+```powershell
+mosquitto -c "C:\Program Files\mosquitto\mosquitto.conf"
+```
+
+**Verify it's running:**
+```powershell
+netstat -an | findstr 1883
+```
+You should see a line with `LISTENING` on port 1883.
+
+### D. Run the MQTT Telemetry Client
+
+Once the broker is running and the ESP32 is connected to Wi-Fi, start the telemetry listener:
+
+```powershell
+python telemetry/mqtt_client.py
+```
+
+### What the Client Does
+
+- Connects to the local MQTT broker (127.0.0.1:1883)
+- Subscribes to all SmartPlug topics (smartplug/*)
+- Displays received messages with timestamps
+- Pretty-prints JSON payloads for readability
+
+### Troubleshooting
+
+- **Connection refused:** Broker is not running. Start Mosquitto first.
+- **No messages received:** Check that the ESP32 is connected to Wi-Fi (check IP in ESP32 logs)
+- **Port 1883 in use:** Another application is using the port. Change the port in mosquitto.conf and mqtt_client.py
 
 ---
 
