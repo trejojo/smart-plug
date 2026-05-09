@@ -12,6 +12,7 @@
 #include "module_ble.h"
 #include "module_wifi.h"
 #include "module_nvs.h"
+#include "module_mqtt.h"
 
 static const char *TAG = "smartplug";
 
@@ -38,6 +39,7 @@ void app_main(void)
 	ESP_ERROR_CHECK(module_nvs_init());
 	ESP_ERROR_CHECK(module_ble_init());
 	ESP_ERROR_CHECK(module_wifi_init());
+	ESP_ERROR_CHECK(module_mqtt_init());
 	
 	/* Check if WiFi credentials exist in NVS */
 	if (!module_nvs_credentials_exist()) {
@@ -64,18 +66,26 @@ void app_main(void)
 				module_ble_reset_credentials();
 			}
 		}
+
+		/* Try to connect MQTT when WiFi is available but MQTT is not connected */
+		if (!module_mqtt_is_connected() && module_wifi_is_connected()) {
+			ESP_LOGI(TAG, "WiFi connected, attempting MQTT connection to 127.0.0.1:1883");
+			module_mqtt_connect("127.0.0.1", 1883);
+		}
 		
+		/* Read and publish telemetry data */
 		float temperature_c;
 		esp_err_t ret = module_tmp102_read_celsius(&temperature_c);
 		if (ret == ESP_OK) {
 			ESP_LOGI(TAG, "Current temperature: %.2f °C", temperature_c);
 		} else {
 			ESP_LOGE(TAG, "Failed to read temperature");
+			temperature_c = 0.0f;
 		}
 
-		// Read PZEM power measurements
-		float voltage_v, current_a, power_w;
-		uint32_t energy_wh;
+		/* Read PZEM power measurements */
+		float voltage_v = 0.0f, current_a = 0.0f, power_w = 0.0f;
+		uint32_t energy_wh = 0;
 
 		ret = module_pzem_read_voltage(0x01, &voltage_v);
 		if (ret == ESP_OK) {
@@ -103,6 +113,11 @@ void app_main(void)
 			ESP_LOGI(TAG, "PZEM Energy: %lu Wh", (unsigned long)energy_wh);
 		} else {
 			ESP_LOGW(TAG, "PZEM energy read failed: %s", esp_err_to_name(ret));
+		}
+
+		/* Publish telemetry via MQTT if connected */
+		if (module_mqtt_is_connected()) {
+			module_mqtt_publish_status(temperature_c, voltage_v, current_a, power_w, energy_wh, true);
 		}
 
 		// Cycle through some example states to demonstrate functionality
