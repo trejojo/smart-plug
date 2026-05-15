@@ -22,6 +22,13 @@ esp_err_t module_mqtt_init(void);
 esp_err_t module_mqtt_connect(const char *broker_ip, uint16_t broker_port);
 
 /**
+ * @brief Connect to MQTT broker using full broker URI
+ *
+ * Example: "mqtt://127.0.0.1:1883" or "mqtts://example.com:8883"
+ */
+esp_err_t module_mqtt_connect_uri(const char *broker_uri);
+
+/**
  * @brief Check if MQTT is connected
  *
  * @return true if connected, false otherwise

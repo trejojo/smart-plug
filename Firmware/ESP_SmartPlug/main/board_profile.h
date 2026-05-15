@@ -28,6 +28,7 @@ typedef struct {
     gpio_num_t pzem_dir_gpio;
     uint32_t pzem_uart_baud_rate;
     uint8_t pzem_default_slave_addr;
+    gpio_num_t setup_bt_button;
 } smartplug_board_pins_t;
 
 const smartplug_board_pins_t *smartplug_board_pins_get(void);

@@ -11,6 +11,8 @@
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
+#include <errno.h>
+#include <fcntl.h>
 
 static const char *TAG = "SDCARD_MODULE";
 static const smartplug_board_pins_t *s_pins;
@@ -35,6 +37,7 @@ esp_err_t module_sdcard_init(void)
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = s_pins->sd_spi_host;
+    host.max_freq_khz = 1000;
     s_spi_host = host.slot;
 
     spi_bus_config_t bus_cfg = {
@@ -64,8 +67,9 @@ esp_err_t module_sdcard_init(void)
     }
 
     s_initialized = true;
-    ESP_LOGI(TAG, "SD card mounted on host %d (CS:%d MOSI:%d MISO:%d SCLK:%d)",
+    ESP_LOGI(TAG, "SD card mounted on host %d at %d kHz (CS:%d MOSI:%d MISO:%d SCLK:%d)",
              s_spi_host,
+             host.max_freq_khz,
              s_pins->sd_cs_gpio,
              s_pins->sd_mosi_gpio,
              s_pins->sd_miso_gpio,
@@ -98,12 +102,40 @@ esp_err_t module_sdcard_write_file(const char *path, const char *data)
     ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "data is null");
 
     FILE *file = fopen(path, "w");
-    ESP_RETURN_ON_FALSE(file != NULL, ESP_FAIL, TAG, "failed to open %s for writing", path);
+    if (file == NULL) {
+        int err = errno;
+        ESP_LOGW(TAG, "fopen(w) failed for %s: %s (errno=%d), trying append mode", path, strerror(err), err);
+        /* try append as a fallback */
+        file = fopen(path, "a");
+        if (file == NULL) {
+            err = errno;
+            ESP_LOGW(TAG, "fopen(a) also failed for %s: %s (errno=%d), trying POSIX open()", path, strerror(err), err);
+            /* try POSIX open() and fdopen() as a last resort */
+            int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0) {
+                err = errno;
+                ESP_LOGE(TAG, "open() failed for %s: %s (errno=%d)", path, strerror(err), err);
+                return ESP_FAIL;
+            }
+            file = fdopen(fd, "w");
+            if (file == NULL) {
+                err = errno;
+                ESP_LOGE(TAG, "fdopen() failed for %s: %s (errno=%d)", path, strerror(err), err);
+                close(fd);
+                return ESP_FAIL;
+            }
+            ESP_LOGI(TAG, "POSIX open+fdopen succeeded for %s", path);
+        }
+    }
 
     int written = fprintf(file, "%s", data);
     fclose(file);
 
-    ESP_RETURN_ON_FALSE(written >= 0, ESP_FAIL, TAG, "failed to write %s", path);
+    if (written < 0) {
+        ESP_LOGE(TAG, "failed to write %s to SD (fprintf error)", path);
+        return ESP_FAIL;
+    }
+
     return ESP_OK;
 }
 
@@ -115,7 +147,11 @@ esp_err_t module_sdcard_read_file(const char *path, char *buffer, size_t buffer_
     ESP_RETURN_ON_FALSE(buffer_size > 0, ESP_ERR_INVALID_ARG, TAG, "buffer too small");
 
     FILE *file = fopen(path, "r");
-    ESP_RETURN_ON_FALSE(file != NULL, ESP_FAIL, TAG, "failed to open %s for reading", path);
+    if (file == NULL) {
+        int err = errno;
+        ESP_LOGE(TAG, "failed to open %s for reading: %s (errno=%d)", path, strerror(err), err);
+        return ESP_FAIL;
+    }
 
     size_t bytes_read = fread(buffer, 1, buffer_size - 1, file);
     bool read_error = ferror(file);

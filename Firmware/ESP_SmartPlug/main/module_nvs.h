@@ -19,6 +19,8 @@
 #define MAX_NVS_SSID_LEN 32
 #define MAX_NVS_PASSWORD_LEN 64
 
+#define NVS_KEY_PZEM_ENABLED "pzem_enabled"
+#
 /**
  * @brief Initialize NVS module
  * 
@@ -76,3 +78,10 @@ esp_err_t module_nvs_get_ssid(char *ssid);
  * @return ESP_OK on success, error code otherwise
  */
 esp_err_t module_nvs_get_password(char *password);
+
+/**
+ * @brief Get whether PZEM support is enabled in NVS
+ *
+ * If the key is not found, the default is enabled (true).
+ */
+esp_err_t module_nvs_get_pzem_enabled(bool *enabled);

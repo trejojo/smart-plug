@@ -2,6 +2,7 @@
 #include "mqtt_client.h"
 #include "esp_log.h"
 #include "cJSON.h"
+#include "module_relay.h"
 #include <string.h>
 
 static const char *TAG = "module_mqtt";
@@ -21,6 +22,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 		case MQTT_EVENT_CONNECTED:
 			ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
 			mqtt_connected = true;
+			/* Subscribe to receive GUI commands */
+			esp_mqtt_client_subscribe(mqtt_client, "smartplug/cmd", 0);
 			break;
 
 		case MQTT_EVENT_DISCONNECTED:
@@ -44,6 +47,17 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 			ESP_LOGI(TAG, "MQTT_EVENT_DATA");
 			ESP_LOGI(TAG, "TOPIC=%.*s", event->topic_len, event->topic);
 			ESP_LOGI(TAG, "DATA=%.*s", event->data_len, event->data);
+			
+			/* Process incoming commands from GUI */
+			if (strncmp(event->topic, "smartplug/cmd", event->topic_len) == 0) {
+				if (strncmp(event->data, "RELAY_ON", event->data_len) == 0) {
+					ESP_LOGW(TAG, "Command received: Turning relay ON");
+					module_relay_set(true);
+				} else if (strncmp(event->data, "RELAY_OFF", event->data_len) == 0) {
+					ESP_LOGW(TAG, "Command received: Turning relay OFF");
+					module_relay_set(false);
+				}
+			}
 			break;
 
 		case MQTT_EVENT_ERROR:
@@ -120,6 +134,51 @@ esp_err_t module_mqtt_connect(const char *broker_ip, uint16_t broker_port)
 }
 
 /**
+ * @brief Connect to MQTT broker using a full URI
+ */
+esp_err_t module_mqtt_connect_uri(const char *broker_uri)
+{
+	if (mqtt_client != NULL) {
+		ESP_LOGI(TAG, "MQTT client already exists, stopping old client");
+		esp_mqtt_client_stop(mqtt_client);
+		esp_mqtt_client_destroy(mqtt_client);
+		mqtt_client = NULL;
+	}
+
+	if (broker_uri == NULL) {
+		ESP_LOGE(TAG, "broker_uri is NULL");
+		return ESP_ERR_INVALID_ARG;
+	}
+
+	ESP_LOGI(TAG, "Connecting to MQTT broker at %s", broker_uri);
+
+	const esp_mqtt_client_config_t mqtt_cfg = {
+		.broker.address.uri = broker_uri,
+		.credentials.username = NULL,
+		.credentials.authentication.password = NULL,
+	};
+
+	mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+	if (mqtt_client == NULL) {
+		ESP_LOGE(TAG, "Failed to create MQTT client");
+		return ESP_FAIL;
+	}
+
+	esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+
+	esp_err_t err = esp_mqtt_client_start(mqtt_client);
+	if (err != ESP_OK) {
+		ESP_LOGE(TAG, "Failed to start MQTT client: %s", esp_err_to_name(err));
+		esp_mqtt_client_destroy(mqtt_client);
+		mqtt_client = NULL;
+		return err;
+	}
+
+	ESP_LOGI(TAG, "MQTT client started");
+	return ESP_OK;
+}
+
+/**
  * @brief Check if MQTT is connected
  */
 bool module_mqtt_is_connected(void)
@@ -128,7 +187,7 @@ bool module_mqtt_is_connected(void)
 }
 
 /**
- * @brief Publish relay status
+ * @brief Publish relay status (JSON format)
  */
 esp_err_t module_mqtt_publish_relay(bool relay_on)
 {
@@ -136,15 +195,31 @@ esp_err_t module_mqtt_publish_relay(bool relay_on)
 		return ESP_ERR_INVALID_STATE;
 	}
 
-	const char *payload = relay_on ? "ON" : "OFF";
+	cJSON *root = cJSON_CreateObject();
+	if (root == NULL) {
+		return ESP_ERR_NO_MEM;
+	}
+
+	cJSON_AddStringToObject(root, "event_type", "RELAY_STATE");
+	cJSON_AddBoolToObject(root, "relay", relay_on);
+
+	char *payload = cJSON_PrintUnformatted(root);
+	if (payload == NULL) {
+		cJSON_Delete(root);
+		return ESP_ERR_NO_MEM;
+	}
 
 	int msg_id = esp_mqtt_client_publish(mqtt_client, "smartplug/relay", payload, 0, 1, 0);
+
+	cJSON_free(payload);
+	cJSON_Delete(root);
+
 	if (msg_id == -1) {
 		ESP_LOGE(TAG, "Failed to publish relay status");
 		return ESP_FAIL;
 	}
 
-	ESP_LOGI(TAG, "Published relay status: %s (msg_id: %d)", payload, msg_id);
+	ESP_LOGI(TAG, "Published relay status (msg_id: %d)", msg_id);
 	return ESP_OK;
 }
 
@@ -171,7 +246,7 @@ esp_err_t module_mqtt_publish_led(uint8_t red, uint8_t green, uint8_t blue)
 }
 
 /**
- * @brief Publish temperature reading
+ * @brief Publish temperature reading (JSON format)
  */
 esp_err_t module_mqtt_publish_temperature(float temp_celsius)
 {
@@ -179,16 +254,31 @@ esp_err_t module_mqtt_publish_temperature(float temp_celsius)
 		return ESP_ERR_INVALID_STATE;
 	}
 
-	char payload[64];
-	snprintf(payload, sizeof(payload), "%.2f", temp_celsius);
+	cJSON *root = cJSON_CreateObject();
+	if (root == NULL) {
+		return ESP_ERR_NO_MEM;
+	}
+
+	cJSON_AddStringToObject(root, "event_type", "TEMPERATURE");
+	cJSON_AddNumberToObject(root, "temperature_c", temp_celsius);
+
+	char *payload = cJSON_PrintUnformatted(root);
+	if (payload == NULL) {
+		cJSON_Delete(root);
+		return ESP_ERR_NO_MEM;
+	}
 
 	int msg_id = esp_mqtt_client_publish(mqtt_client, "smartplug/temperature", payload, 0, 1, 0);
+
+	cJSON_free(payload);
+	cJSON_Delete(root);
+
 	if (msg_id == -1) {
 		ESP_LOGE(TAG, "Failed to publish temperature");
 		return ESP_FAIL;
 	}
 
-	ESP_LOGI(TAG, "Published temperature: %s°C (msg_id: %d)", payload, msg_id);
+	ESP_LOGI(TAG, "Published temperature (msg_id: %d)", msg_id);
 	return ESP_OK;
 }
 
@@ -211,7 +301,7 @@ esp_err_t module_mqtt_publish_energy(float voltage_v, float current_a, float pow
 	cJSON_AddNumberToObject(root, "power", power_w);
 	cJSON_AddNumberToObject(root, "energy", energy_wh);
 
-	char *payload = cJSON_Print(root);
+	char *payload = cJSON_PrintUnformatted(root);
 	if (payload == NULL) {
 		cJSON_Delete(root);
 		return ESP_ERR_NO_MEM;
@@ -245,6 +335,7 @@ esp_err_t module_mqtt_publish_status(float temp_celsius, float voltage_v, float 
 		return ESP_ERR_NO_MEM;
 	}
 
+	cJSON_AddStringToObject(root, "event_type", "HEARTBEAT");
 	cJSON_AddNumberToObject(root, "temperature", temp_celsius);
 	cJSON_AddNumberToObject(root, "voltage", voltage_v);
 	cJSON_AddNumberToObject(root, "current", current_a);
@@ -252,7 +343,7 @@ esp_err_t module_mqtt_publish_status(float temp_celsius, float voltage_v, float 
 	cJSON_AddNumberToObject(root, "energy", energy_wh);
 	cJSON_AddBoolToObject(root, "relay", relay_on);
 
-	char *payload = cJSON_Print(root);
+	char *payload = cJSON_PrintUnformatted(root);
 	if (payload == NULL) {
 		cJSON_Delete(root);
 		return ESP_ERR_NO_MEM;
@@ -268,7 +359,7 @@ esp_err_t module_mqtt_publish_status(float temp_celsius, float voltage_v, float 
 		return ESP_FAIL;
 	}
 
-	ESP_LOGI(TAG, "Published status (msg_id: %d)", msg_id);
+	ESP_LOGI(TAG, "Published HEARTBEAT status (msg_id: %d)", msg_id);
 	return ESP_OK;
 }
 

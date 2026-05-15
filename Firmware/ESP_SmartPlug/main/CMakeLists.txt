@@ -1,12 +1,8 @@
-idf_component_register(SRCS "module_mqtt.c" "main.c"
+idf_component_register(SRCS "main.c"
                     "board_profile.c"
                     "module_relay.c"
                     "module_ledstrip.c"
                     "module_sdcard.c"
                     "module_tmp102.c"
-                    "module_pzem.c"
-                    "module_ble.c"
-                    "module_wifi.c"
-                    "module_nvs.c"
                     INCLUDE_DIRS "."
-                    PRIV_REQUIRES led_strip fatfs sdmmc vfs pzem-driver bt nvs_flash json esp_wifi esp_event esp_netif mqtt)
+                    PRIV_REQUIRES led_strip fatfs sdmmc vfs whysaputro__tmp102)

@@ -2,7 +2,7 @@
 
 #include "sdkconfig.h"
 
-static const smartplug_board_pins_t s_devkit_pins = {
+__attribute__((unused)) static const smartplug_board_pins_t s_devkit_pins = {
     .relay_gpio = GPIO_NUM_2,
     .rgb_led_gpio = GPIO_NUM_38,
     .tmp102_i2c_port = I2C_NUM_0,
@@ -22,7 +22,7 @@ static const smartplug_board_pins_t s_devkit_pins = {
     .pzem_default_slave_addr = 0x01,
 };
 
-__attribute__((unused)) static const smartplug_board_pins_t s_custom_pcb_pins = {
+static const smartplug_board_pins_t s_custom_pcb_pins = {
     .relay_gpio = GPIO_NUM_15,
     .rgb_led_gpio = GPIO_NUM_16,
     .tmp102_i2c_port = I2C_NUM_0,
@@ -34,12 +34,8 @@ __attribute__((unused)) static const smartplug_board_pins_t s_custom_pcb_pins = 
     .sd_mosi_gpio = GPIO_NUM_5,
     .sd_sclk_gpio = GPIO_NUM_6,
     .sd_miso_gpio = GPIO_NUM_7,
-    .pzem_uart_port = UART_NUM_1,
-    .pzem_tx_gpio = GPIO_NUM_11,
-    .pzem_rx_gpio = GPIO_NUM_13,
-    .pzem_dir_gpio = GPIO_NUM_NC,
-    .pzem_uart_baud_rate = 9600,
-    .pzem_default_slave_addr = 0x01,
+    .setup_bt_button = GPIO_NUM_8,
+    // Ade library is not yet integrated, so these pins are reserved for future use and not currently defined in the board profile
     /*
     .ade_spi_host = SPI2_HOST,
     .ade_cs_gpio = GPIO_NUM_10,
