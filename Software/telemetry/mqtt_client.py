@@ -9,17 +9,13 @@ from datetime import datetime
 import time
 
 # MQTT Configuration
-MQTT_BROKER = "127.0.0.1"  # Local PC (MQTT broker must run on this machine)
+MQTT_BROKER = "192.168.137.1"  # Local PC (MQTT broker must run on this machine)
 MQTT_PORT = 1883
 MQTT_KEEPALIVE = 60
 
 # Subscribe to these topic patterns
 TOPICS = [
-    "smartplug/status",
-    "smartplug/relay",
-    "smartplug/led",
-    "smartplug/energy",
-    "smartplug/#",  # Wildcard to catch ALL smartplug topics
+    "smartplug/#"  # Enough to catch everything under the smartplug namespace
 ]
 
 # Flag to track if we're connected
@@ -33,8 +29,8 @@ def on_connect(client, userdata, flags, rc):
     
     if rc == 0:
         is_connected = True
-        print(f"[{timestamp}] ✅ Connected to MQTT broker at {MQTT_BROKER}:{MQTT_PORT}")
-        print(f"[{timestamp}] 📡 Subscribing to topics...\n")
+        print(f"[{timestamp}] Connected to MQTT broker at {MQTT_BROKER}:{MQTT_PORT}")
+        print(f"[{timestamp}] Subscribing to topics...\n")
         # Subscribe to all topics
         for topic in TOPICS:
             result = client.subscribe(topic)
@@ -53,7 +49,7 @@ def on_connect(client, userdata, flags, rc):
             5: "Not authorized"
         }
         error_msg = error_codes.get(rc, f"Unknown error code {rc}")
-        print(f"[{timestamp}] ❌ Connection failed: {error_msg}")
+        print(f"[{timestamp}] Connection failed: {error_msg}")
 
 
 def on_disconnect(client, userdata, rc):
@@ -62,9 +58,9 @@ def on_disconnect(client, userdata, rc):
     is_connected = False
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if rc == 0:
-        print(f"[{timestamp}] ⏹️  Disconnected from MQTT broker (clean)")
+        print(f"[{timestamp}] Disconnected from MQTT broker (clean)")
     else:
-        print(f"[{timestamp}] ⚠️  Unexpected disconnection (code: {rc})")
+        print(f"[{timestamp}] Unexpected disconnection (code: {rc})")
 
 
 def on_message(client, userdata, msg):
@@ -80,7 +76,7 @@ def on_message(client, userdata, msg):
     except Exception as e:
         payload = f"[Binary data: {len(msg.payload)} bytes] Error: {e}"
     
-    print(f"[{timestamp}] 📨 Message received")
+    print(f"[{timestamp}] Message received")
     print(f"    Topic: {topic}")
     print(f"    QoS: {qos}, Retained: {retain}")
     print(f"    Payload: {payload}")
@@ -147,15 +143,15 @@ def main():
     # client.enable_logger(logging.getLogger())
     
     try:
-        print(f"🔌 Connecting to {MQTT_BROKER}:{MQTT_PORT}...")
+        print(f" Connecting to {MQTT_BROKER}:{MQTT_PORT}...")
         client.connect(MQTT_BROKER, MQTT_PORT, MQTT_KEEPALIVE)
         
         # Start the blocking loop
-        print("📡 Starting listener loop. Press Ctrl+C to stop.\n")
+        print(" Starting listener loop. Press Ctrl+C to stop.\n")
         client.loop_forever()
         
     except ConnectionRefusedError as e:
-        print(f"\n❌ Connection refused. Could not connect to {MQTT_BROKER}:{MQTT_PORT}")
+        print(f"\n Connection refused. Could not connect to {MQTT_BROKER}:{MQTT_PORT}")
         print("   Make sure the MQTT broker (Mosquitto) is running:")
         print("   • Check Windows Services for 'Mosquitto Broker'")
         print("   • Or start manually: mosquitto -c mosquitto.conf")
@@ -163,14 +159,14 @@ def main():
         print(f"   Error details: {e}")
         
     except OSError as e:
-        print(f"\n❌ Connection error: {e}")
+        print(f"\n Connection error: {e}")
         print(f"   Check that:")
         print(f"   • Mosquitto broker is running on {MQTT_BROKER}:{MQTT_PORT}")
         print(f"   • Firewall is not blocking port 1883")
         print(f"   • Configuration file has: listener 1883 and allow_anonymous true")
         
     except KeyboardInterrupt:
-        print("\n\n⏹️  Listener stopped by user")
+        print("\n\n Listener stopped by user")
         if is_connected:
             client.disconnect()
         client.loop_stop()

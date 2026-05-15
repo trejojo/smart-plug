@@ -14,6 +14,10 @@
 #include "module_relay.h"
 #include "module_sdcard.h"
 #include "module_tmp102.h"
+#include "module_ble.h"
+#include "module_wifi.h"
+#include "module_nvs.h"
+#include "module_mqtt.h"
 
 static const char *TAG = "smartplug";
 
@@ -71,13 +75,17 @@ static void ade7953_startup_config(void)
     ESP_ERROR_CHECK(module_ade7953_enable_default_power_quality_irqs());
 }
 
-static bool ade7953_service_and_should_trip(void)
+static bool ade7953_service_and_should_trip(ade7953_measurement_t *out_measurement)
 {
     ade7953_measurement_t m;
     esp_err_t ret = module_ade7953_read_measurement(&m, true, true);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "ADE7953 read failed: %s", esp_err_to_name(ret));
         return false;
+    }
+
+    if (out_measurement != NULL) {
+        *out_measurement = m;
     }
 
     ESP_LOGI(TAG,
@@ -161,8 +169,48 @@ void app_main(void)
 
     const char *test_path = MODULE_SDCARD_MOUNT_POINT "/test.txt";
 
-    while (true) {
+	/* Initialize NVS and BLE for credential provisioning */
+	ESP_ERROR_CHECK(module_nvs_init());
+	ESP_ERROR_CHECK(module_ble_init());
+	ESP_ERROR_CHECK(module_wifi_init());
+	ESP_ERROR_CHECK(module_mqtt_init());
+	
+	/* Check if WiFi credentials exist in NVS */
+	if (!module_nvs_credentials_exist()) {
+		ESP_LOGW(TAG, "No WiFi credentials found, starting BLE advertising for provisioning");
+		ESP_ERROR_CHECK(module_ble_start_advertising());
+	} else {
+		ESP_LOGI(TAG, "WiFi credentials found in NVS");
+		char ssid[33], password[65];
+		if (module_nvs_get_ssid(ssid) == ESP_OK && module_nvs_get_password(password) == ESP_OK) {
+			ESP_LOGI(TAG, "SSID: %s (will connect to WiFi)", ssid);
+			ESP_ERROR_CHECK(module_wifi_connect(ssid, password));
+		}
+	}
+
+
+        while (true) {
+		/* Check if credentials were received via BLE */
+		if (module_ble_credentials_received()) {
+			char ssid[33], password[65];
+			if (module_ble_get_ssid(ssid) == ESP_OK && module_ble_get_password(password) == ESP_OK) {
+				ESP_LOGI(TAG, "Credentials received via BLE, saving to NVS (SSID: %s)", ssid);
+				ESP_ERROR_CHECK(module_nvs_save_wifi_credentials(ssid, password));
+				ESP_ERROR_CHECK(module_ble_stop_advertising());
+				ESP_ERROR_CHECK(module_wifi_connect(ssid, password));
+				module_ble_reset_credentials();
+			}
+		}
+
+		/* Try to connect MQTT when WiFi is available but MQTT is not connected */
+		if (!module_mqtt_is_connected() && module_wifi_is_connected()) {
+			ESP_LOGI(TAG, "WiFi connected, attempting MQTT connection to 192.168.137.1:1883");
+			module_mqtt_connect("192.168.137.1", 1883);
+		}
+
         bool ade_trip = false;
+        ade7953_measurement_t ade_m = {0};
+        bool ade_sample_valid = false;
 
         float temperature_c = 0.0f;
         if (module_tmp102_read_celsius(&temperature_c) == ESP_OK) {
@@ -183,7 +231,8 @@ void app_main(void)
         }
 
         if (ade_init_ret == ESP_OK) {
-            ade_trip = ade7953_service_and_should_trip();
+            ade_trip = ade7953_service_and_should_trip(&ade_m);
+            ade_sample_valid = true;
         }
 
         int button_level = gpio_get_level(pins->setup_bt_button);
@@ -200,6 +249,27 @@ void app_main(void)
             status_led_set(STATUS_PROVISIONING);
         }
 
+		
+
+        if (module_mqtt_is_connected()) {
+            (void)module_mqtt_publish_temperature(temperature_c);
+
+            if (ade_sample_valid) {
+                float voltage_v = ade_m.voltage_vrms;
+                float current_a = ade_m.current_a_arms;
+                float power_w = ade_m.active_power_a_w;
+                uint32_t energy_wh = (ade_m.active_energy_a_wh_total > 0.0f)
+                    ? (uint32_t)ade_m.active_energy_a_wh_total
+                    : 0U;
+                bool relay_on = (!ade_trip && (button_level == 0));
+
+                (void)module_mqtt_publish_energy(voltage_v, current_a, power_w, energy_wh);
+                (void)module_mqtt_publish_status(temperature_c, voltage_v, current_a, power_w, energy_wh, relay_on);
+            } else {
+                (void)module_mqtt_publish_status(temperature_c, 0.0f, 0.0f, 0.0f, 0U, false);
+            }
+        }
+	
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

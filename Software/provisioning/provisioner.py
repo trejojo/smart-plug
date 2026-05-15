@@ -9,7 +9,7 @@ SERVICE_UUID = "f0debc9a-7856-3412-7856-341278563412"
 # Derived from CREDS_JSON_CHAR_UUID bytes (NimBLE uses little-endian byte order)
 CHAR_UUID_JSON = "f1debc9a-7856-3412-7856-341278563412"
 DEVICE_NAME = "SmartPlug"
-TARGET_MAC = "D8:3B:DA:8A:2B:A6" # Got by Nrf connect 
+TARGET_MAC = "E0:72:A1:CE:A3:8A" # Got by Nrf connect 
 
 async def main():
     print(f"--- Searching for device with MAC {TARGET_MAC}... ---")
