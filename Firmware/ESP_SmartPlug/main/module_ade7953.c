@@ -38,6 +38,15 @@ static float s_total_reactive_energy_b_varh = 0.0f;
 static float s_total_apparent_energy_a_vah = 0.0f;
 static float s_total_apparent_energy_b_vah = 0.0f;
 
+static const uint32_t ADE7953_SAFE_IRQ_A_MASK =
+    ADE7953_IRQ_A_SAG |
+    ADE7953_IRQ_A_OV |
+    ADE7953_IRQ_A_OIA |
+    ADE7953_IRQ_A_CRC;
+
+static const uint32_t ADE7953_SAFE_IRQ_B_MASK =
+    ADE7953_IRQ_B_OIB;
+
 static esp_err_t ensure_initialized(void)
 {
     return s_initialized && s_spi ? ESP_OK : ESP_ERR_INVALID_STATE;
@@ -256,9 +265,11 @@ esp_err_t module_ade7953_init_with_config(const ade7953_config_t *config)
         ESP_RETURN_ON_ERROR(module_ade7953_apply_required_settings(), TAG, "required settings failed");
     }
 
-    /* Clear the reset interrupt latched during power-up/reset. */
-    uint32_t dummy = 0;
-    (void)module_ade7953_read32(ADE7953_REG_RSTIRQSTATA_32, &dummy);
+    /* Clear the reset interrupt latched during power-up/reset on both channels. */
+    ade7953_events_t startup_events;
+    if (module_ade7953_read_events(&startup_events, true) == ESP_OK && startup_events.reset_done) {
+        ESP_LOGI(TAG, "Cleared ADE7953 power-up reset IRQ");
+    }
 
     if (s_cfg.lock_spi_interface) {
         ESP_RETURN_ON_ERROR(module_ade7953_lock_spi_interface(), TAG, "SPI lock failed");
@@ -941,8 +952,8 @@ void module_ade7953_evaluate_safety(const ade7953_measurement_t *measurement,
 
     if (limits->enable_hw_critical_trip) {
         out_decision->ade_hw_critical_event =
-            ((measurement->raw.irq_a & (ADE7953_IRQ_A_SAG | ADE7953_IRQ_A_OV | ADE7953_IRQ_A_OIA | ADE7953_IRQ_A_ZXTO | ADE7953_IRQ_A_ZXTO_IA | ADE7953_IRQ_A_CRC)) != 0) ||
-            ((measurement->raw.irq_b & (ADE7953_IRQ_B_OIB | ADE7953_IRQ_B_ZXTO_IB)) != 0);
+            ((measurement->raw.irq_a & ADE7953_SAFE_IRQ_A_MASK) != 0) ||
+            ((measurement->raw.irq_b & ADE7953_SAFE_IRQ_B_MASK) != 0);
     }
 
     if (limits->enable_rms_voltage_limits && s_cal.volts_per_vrms_lsb > 0.0f) {
