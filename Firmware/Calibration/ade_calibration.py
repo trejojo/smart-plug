@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import time
 
-PORT = "COM5"      # Change to your ESP32 port
+PORT = "COM11"      # Change to your ESP32 port
 BAUD = 115200
 COLUMNS = ["t_ms", "vrms_raw", "irmsa_raw", "irmsb_raw", "awatt_raw", "avar_raw", "ava_raw", "aenergy_raw", "pf_raw", "period_raw"]
 
@@ -96,14 +96,7 @@ def main():
     print("=== AICE SmartPlug Calibration Tool ===")
     
     while True:
-        print("\nSelect Calibration Stage:")
-        print("1. No load, relay open (Offset Check)")
-        print("2. Known voltage, no current (VRMS Cal)")
-        print("3. Known resistive load (IRMSA, AWATT, PF Cal)")
-        print("4. Inductive/capacitive load (VAR, PF Validate)")
-        print("5. Overload/sag test")
-        print("6. Long run (Wh Validate)")
-        print("0. Exit")
+        
         
         choice = input("Enter choice (0-6): ")
         
@@ -157,6 +150,40 @@ def main():
                 plt.xlabel("Time (s)")
                 plt.grid(True)
                 plt.show(block=False)
+        # Insert this option inside you7r Python tool's main selection menu
+        elif choice == '7':
+            print("\n---> Streaming live 7kHz waveforms. Press Ctrl+C to stop and plot signal structure...")
+            wave_rows = []
+            try:
+                with serial.Serial(PORT, BAUD, timeout=1) as ser:
+                    ser.reset_input_buffer()
+                    while True:
+                        line = ser.readline().decode(errors="ignore").strip()
+                        if not line or line.startswith("WAVE"):
+                            continue
+                        try:
+                            parts = line.split(",")
+                            if len(parts) == 2:
+                                wave_rows.append({"V_wave": int(parts[0]), "I_wave": int(parts[1])})
+                                # Stop after capturing roughly 3-4 full cycles for clean resolution 
+                                if len(wave_rows) >= 1000: 
+                                    break
+                        except ValueError:
+                            pass
+            except KeyboardInterrupt:
+                pass
+
+            if wave_rows:
+                w_df = pd.DataFrame(wave_rows)
+                fig, axes = plt.subplots(2, 1, figsize=(10, 6))
+                axes[0].plot(w_df["V_wave"], color='blue', label='Reconstructed Voltage Sine Wave')
+                axes[0].grid(True)
+                axes[0].legend()
+                
+                axes[1].plot(w_df["I_wave"], color='red', label='Reconstructed Current Sine Wave')
+                axes[1].grid(True)
+                axes[1].legend()
+                plt.show()
 
 if __name__ == "__main__":
     main()
