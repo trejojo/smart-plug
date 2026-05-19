@@ -2,7 +2,7 @@
 
 #include "sdkconfig.h"
 
-static const smartplug_board_pins_t s_devkit_pins = {
+__attribute__((unused)) static const smartplug_board_pins_t s_devkit_pins = {
     .relay_gpio = GPIO_NUM_2,
     .rgb_led_gpio = GPIO_NUM_38,
     .tmp102_i2c_port = I2C_NUM_0,
@@ -22,7 +22,7 @@ static const smartplug_board_pins_t s_devkit_pins = {
     .pzem_default_slave_addr = 0x01,
 };
 
-__attribute__((unused)) static const smartplug_board_pins_t s_custom_pcb_pins = {
+static const smartplug_board_pins_t s_custom_pcb_pins = {
     .relay_gpio = GPIO_NUM_15,
     .rgb_led_gpio = GPIO_NUM_16,
     .tmp102_i2c_port = I2C_NUM_0,
