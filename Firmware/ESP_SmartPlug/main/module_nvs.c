@@ -242,3 +242,121 @@ esp_err_t module_nvs_get_pzem_enabled(bool *enabled)
 	*enabled = (val != 0);
 	return ESP_OK;
 }
+
+/* Calibration persistence ------------------------------------------------- */
+esp_err_t module_nvs_save_calibration(float kv, float ki, float wh_lsb)
+{
+	nvs_handle_t handle;
+	esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+	if (ret != ESP_OK) {
+		ESP_LOGE(TAG, "Failed to open NVS for calibration: %s", esp_err_to_name(ret));
+		return ret;
+	}
+
+	ret = nvs_set_blob(handle, NVS_KEY_KV, &kv, sizeof(kv));
+	if (ret != ESP_OK) goto done;
+	ret = nvs_set_blob(handle, NVS_KEY_KI, &ki, sizeof(ki));
+	if (ret != ESP_OK) goto done;
+	ret = nvs_set_blob(handle, NVS_KEY_WH_LSB, &wh_lsb, sizeof(wh_lsb));
+	if (ret != ESP_OK) goto done;
+
+	ret = nvs_commit(handle);
+	if (ret == ESP_OK) {
+		ESP_LOGI(TAG, "Calibration saved to NVS (kv=%f, ki=%f, wh_lsb=%f)", kv, ki, wh_lsb);
+	} else {
+		ESP_LOGE(TAG, "Failed to commit calibration to NVS: %s", esp_err_to_name(ret));
+	}
+
+done:
+	nvs_close(handle);
+	return ret;
+}
+
+esp_err_t module_nvs_load_calibration(float *kv, float *ki, float *wh_lsb)
+{
+	if (kv == NULL || ki == NULL || wh_lsb == NULL) {
+		return ESP_ERR_INVALID_ARG;
+	}
+
+	nvs_handle_t handle;
+	esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG, "NVS namespace not present for calibration: %s", esp_err_to_name(ret));
+		*kv = *ki = *wh_lsb = 0.0f;
+		return ESP_OK;
+	}
+
+	size_t required = 0;
+	required = sizeof(float);
+	ret = nvs_get_blob(handle, NVS_KEY_KV, kv, &required);
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG, "KV not found in NVS: %s", esp_err_to_name(ret));
+		*kv = 0.0f;
+	}
+
+	required = sizeof(float);
+	ret = nvs_get_blob(handle, NVS_KEY_KI, ki, &required);
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG, "KI not found in NVS: %s", esp_err_to_name(ret));
+		*ki = 0.0f;
+	}
+
+	required = sizeof(float);
+	ret = nvs_get_blob(handle, NVS_KEY_WH_LSB, wh_lsb, &required);
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG, "WH_LSB not found in NVS: %s", esp_err_to_name(ret));
+		*wh_lsb = 0.0f;
+	}
+
+	nvs_close(handle);
+	ESP_LOGI(TAG, "Calibration loaded from NVS (kv=%f, ki=%f, wh_lsb=%f)", *kv, *ki, *wh_lsb);
+	return ESP_OK;
+}
+
+/* AWGAIN persistence ----------------------------------------------------- */
+esp_err_t module_nvs_save_awgain(uint32_t awgain_raw24)
+{
+	nvs_handle_t handle;
+	esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+	if (ret != ESP_OK) {
+		ESP_LOGE(TAG, "Failed to open NVS for AWGAIN: %s", esp_err_to_name(ret));
+		return ret;
+	}
+
+	ret = nvs_set_u32(handle, NVS_KEY_AWGAIN, awgain_raw24 & 0x00FFFFFFU);
+	if (ret == ESP_OK) {
+		ret = nvs_commit(handle);
+	}
+	if (ret == ESP_OK) {
+		ESP_LOGI(TAG, "AWGAIN saved to NVS: 0x%06X", awgain_raw24 & 0x00FFFFFFU);
+	} else {
+		ESP_LOGE(TAG, "Failed to save AWGAIN to NVS: %s", esp_err_to_name(ret));
+	}
+
+	nvs_close(handle);
+	return ret;
+}
+
+esp_err_t module_nvs_load_awgain(uint32_t *awgain_raw24)
+{
+	if (awgain_raw24 == NULL) return ESP_ERR_INVALID_ARG;
+	nvs_handle_t handle;
+	esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG, "NVS namespace not present for AWGAIN: %s", esp_err_to_name(ret));
+		*awgain_raw24 = 0;
+		return ESP_OK;
+	}
+
+	uint32_t val = 0;
+	ret = nvs_get_u32(handle, NVS_KEY_AWGAIN, &val);
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG, "AWGAIN not found in NVS: %s", esp_err_to_name(ret));
+		*awgain_raw24 = 0;
+	} else {
+		*awgain_raw24 = val & 0x00FFFFFFU;
+		ESP_LOGI(TAG, "AWGAIN loaded from NVS: 0x%06X", *awgain_raw24);
+	}
+	nvs_close(handle);
+	return ESP_OK;
+}

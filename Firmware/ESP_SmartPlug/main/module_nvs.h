@@ -21,6 +21,12 @@
 
 #define NVS_KEY_PZEM_ENABLED "pzem_enabled"
 #
+/* Calibration constants keys */
+#define NVS_KEY_KV "kv"
+#define NVS_KEY_KI "ki"
+#define NVS_KEY_WH_LSB "wh_lsb"
+#define NVS_KEY_AWGAIN "awgain"
+
 /**
  * @brief Initialize NVS module
  * 
@@ -30,6 +36,14 @@
  * @return ESP_OK on success, error code otherwise
  */
 esp_err_t module_nvs_init(void);
+
+/* Calibration persistence */
+esp_err_t module_nvs_save_calibration(float kv, float ki, float wh_lsb);
+esp_err_t module_nvs_load_calibration(float *kv, float *ki, float *wh_lsb);
+
+/* AWGAIN persistence */
+esp_err_t module_nvs_save_awgain(uint32_t awgain_raw24);
+esp_err_t module_nvs_load_awgain(uint32_t *awgain_raw24);
 
 /**
  * @brief Save WiFi credentials to NVS
