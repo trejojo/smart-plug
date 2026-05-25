@@ -3,10 +3,17 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
 import time
+import math
 
-PORT = "COM11"      # Change to your ESP32 port
+PORT = "COM11"      # Ensure this matches your ESP32 port
 BAUD = 115200
-COLUMNS = ["t_ms", "vrms_raw", "irmsa_raw", "irmsb_raw", "awatt_raw", "avar_raw", "ava_raw", "aenergy_raw", "pf_raw", "period_raw"]
+
+# Global session variables to carry calculations between stages
+session_constants = {
+    "v_const": 0.0,
+    "i_const": 0.0,
+    "wh_lsb": 0.0
+}
 
 def collect_data(duration_sec, stage_name):
     rows = []
@@ -14,20 +21,19 @@ def collect_data(duration_sec, stage_name):
     
     try:
         with serial.Serial(PORT, BAUD, timeout=2) as ser:
-            # Flush existing buffer
             ser.reset_input_buffer()
             start_time = time.time()
             
             while (time.time() - start_time) < duration_sec:
                 line = ser.readline().decode(errors="ignore").strip()
                 
-                # Filter out standard ESP logging or empty lines
-                if not line or line.startswith(("\x1b", "I ", "W ", "E ", "t_ms")):
+                if not line or line.startswith(("\x1b", "I ", "W ", "E ", "t_ms", "CRITICAL")):
                     continue
                 
                 try:
                     parts = line.split(",")
-                    if len(parts) == 10:
+                    # Handle both 10-column standard and 12-column headroom modes
+                    if len(parts) >= 10:
                         row = {
                             "t_ms": int(parts[0]),
                             "vrms_raw": int(parts[1]),
@@ -40,12 +46,15 @@ def collect_data(duration_sec, stage_name):
                             "pf_raw": int(parts[8]),
                             "period_raw": int(parts[9]),
                         }
+                        if len(parts) >= 12:
+                            row["vpeak_raw"] = int(parts[10])
+                            row["iapeak_raw"] = int(parts[11])
                         rows.append(row)
                 except ValueError:
-                    pass # Malformed line, skip
+                    pass
 
     except serial.SerialException as e:
-        print(f"Serial Error: {e}. Is the port correct and not open in another program?")
+        print(f"Serial Error: {e}. Is the port correct and closed elsewhere?")
         return None
 
     if not rows:
@@ -53,14 +62,12 @@ def collect_data(duration_sec, stage_name):
         return None
 
     df = pd.DataFrame(rows)
-    # Save to CSV
     filename = f"{stage_name.replace(' ', '_').lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     df.to_csv(filename, index=False)
     print(f"Saved {len(df)} samples to {filename}")
     return df
 
 def plot_data(df, stage_name):
-    # Normalize time to start at 0
     t0 = df["t_ms"].iloc[0]
     df["t_rel_s"] = (df["t_ms"] - t0) / 1000.0
 
@@ -68,121 +75,154 @@ def plot_data(df, stage_name):
     fig.suptitle(f"AICE Calibration: {stage_name}")
 
     axes[0].plot(df["t_rel_s"], df["vrms_raw"], label="VRMS Raw", color='blue')
-    axes[0].legend()
-    axes[0].grid(True)
+    axes[0].legend(); axes[0].grid(True)
 
     axes[1].plot(df["t_rel_s"], df["irmsa_raw"], label="IRMSA Raw", color='orange')
-    axes[1].legend()
-    axes[1].grid(True)
+    axes[1].legend(); axes[1].grid(True)
 
     axes[2].plot(df["t_rel_s"], df["awatt_raw"], label="AWATT Raw", color='green')
     axes[2].set_xlabel("Time (seconds)")
-    axes[2].legend()
-    axes[2].grid(True)
+    axes[2].legend(); axes[2].grid(True)
 
     plt.tight_layout()
-    plt.show(block=False) # Non-blocking so menu continues
-
-def calculate_constant(df, column, reference_val):
-    avg_raw = df[column].mean()
-    if avg_raw == 0:
-        return 0
-    constant = reference_val / avg_raw
-    print(f"Average {column}: {avg_raw:.2f}")
-    print(f"Calculated Constant (Ref / Raw): {constant:.8f}")
-    return constant
+    plt.show(block=False)
 
 def main():
-    print("=== AICE SmartPlug Calibration Tool ===")
+    print("=== AICE SmartPlug Calibration Tool (Register Method) ===")
     
     while True:
+        print("\n--- Calibration Menu ---")
+        print("1. Verify Raw Signals & Headroom")
+        print("2. Calibrate VRMS (K_V)")
+        print("3. Calibrate IRMSA (K_I)")
+        print("4. Calculate Wh/LSB Constant (PF=1 Load)")
+        print("5. Calibrate AWGAIN (Requires Wh/LSB)")
+        print("6. Phase Calibration PHCALA (Requires Inductive PF=0.5 Load)")
+        print("7. Stream 7kHz Waveform (Requires Firmware toggle to 1)")
+        print("0. Exit")
         
-        
-        choice = input("Enter choice (0-6): ")
+        choice = input("Select Stage (0-7): ")
         
         if choice == '0':
             break
             
         elif choice == '1':
-            df = collect_data(10, "No Load Offset")
-            if df is not None:
-                plot_data(df, "No Load Offset")
-                print("Observe the plotted offsets. If IRMS/WATT hover above 0 significantly, firmware offset registers may be needed.")
+            df = collect_data(5, "Raw Verification")
+            if df is not None and "vpeak_raw" in df.columns:
+                max_v = df["vpeak_raw"].max()
+                max_i = df["iapeak_raw"].max()
+                print(f"Max VPEAK: {max_v} ({(max_v/5326510)*100:.1f}% of ADC limit)")
+                print(f"Max IAPEAK: {max_i} ({(max_i/5326510)*100:.1f}% of ADC limit)")
+                plot_data(df, "Raw Signals")
                 
         elif choice == '2':
-            ref_v = float(input("Enter actual multimeter voltage (e.g. 120.5): "))
-            df = collect_data(10, "Voltage Calibration")
+            ref_v = float(input("Enter Multimeter Voltage (VRMS): "))
+            df = collect_data(10, "Voltage Cal")
             if df is not None:
-                plot_data(df, "Voltage Calibration")
-                calculate_constant(df, "vrms_raw", ref_v)
+                session_constants["v_const"] = ref_v / df["vrms_raw"].mean()
+                print(f"VRMS Constant (K_V): {session_constants['v_const']:.8f} V/LSB")
                 
         elif choice == '3':
-            ref_i = float(input("Enter actual multimeter current (Amps): "))
-            ref_w = float(input("Enter actual reference power (Watts): "))
-            df = collect_data(15, "Resistive Load")
+            ref_i = float(input("Enter Clamp Meter Current (ARMS): "))
+            df = collect_data(10, "Current Cal")
             if df is not None:
-                plot_data(df, "Resistive Load")
-                calculate_constant(df, "irmsa_raw", ref_i)
-                calculate_constant(df, "awatt_raw", ref_w)
-                
+                session_constants["i_const"] = ref_i / df["irmsa_raw"].mean()
+                print(f"IRMSA Constant (K_I): {session_constants['i_const']:.8f} A/LSB")
+
         elif choice == '4':
-            df = collect_data(15, "Reactive Load")
+            ref_w = float(input("Enter True Active Power (Watts) of Resistive Load: "))
+            duration = 15
+            df = collect_data(duration, "Wh LSB Cal")
             if df is not None:
-                plot_data(df, "Reactive Load")
-                print("Review the plot. Check if AVAR represents the expected reactive power.")
+                # Sum the energy deltas over the timeframe
+                total_raw_energy = df["aenergy_raw"].sum()
+                real_wh_accumulated = (ref_w * duration) / 3600.0
                 
+                if total_raw_energy > 0:
+                    session_constants["wh_lsb"] = real_wh_accumulated / total_raw_energy
+                    print(f"Total Raw Energy Sum: {total_raw_energy}")
+                    print(f"Real Wh Accumulated: {real_wh_accumulated:.6f} Wh")
+                    print(f"--> Wh/LSB Constant: {session_constants['wh_lsb']:.8e}")
+                else:
+                    print("Error: 0 raw energy accumulated. Is the load drawing power?")
+
         elif choice == '5':
-            print("Toggle the relay/load physically or via the ESP button to trigger sag/overload.")
-            df = collect_data(20, "Overload Sag")
+            if session_constants["wh_lsb"] == 0.0:
+                print("Please calculate Wh/LSB (Option 4) first!")
+                continue
+            
+            ref_w = float(input("Enter True Active Power (Watts) of Resistive Load: "))
+            duration = 10
+            df = collect_data(duration, "AWGAIN Cal")
             if df is not None:
-                plot_data(df, "Overload Sag")
-                print(f"Max IRMS observed: {df['irmsa_raw'].max()}")
-                print(f"Min VRMS observed: {df['vrms_raw'].min()}")
+                actual_raw = df["aenergy_raw"].sum()
+                expected_raw = ((ref_w * duration) / 3600.0) / session_constants["wh_lsb"]
                 
+                if actual_raw > 0:
+                    awgain = 0x400000 * (expected_raw / actual_raw)
+                    print(f"Expected Raw: {expected_raw:.1f} | Actual Raw: {actual_raw}")
+                    print(f"--> Write to AWGAIN Register: 0x{int(awgain):06X}")
+                else:
+                    print("Error: No raw energy detected.")
+
         elif choice == '6':
-            duration = int(input("Enter duration in seconds (e.g. 3600 for 1 hr): "))
-            df = collect_data(duration, "Long Run")
+            print("Connect an INDUCTIVE load (PF around 0.5 Lagging).")
+            ref_pf = float(input("Enter exact True Power Factor (e.g., 0.52): "))
+            ref_w = float(input("Enter True Active Power (Watts): "))
+            duration = 15
+            df = collect_data(duration, "Phase Cal")
             if df is not None:
-                df["energy_accumulated"] = df["aenergy_raw"].cumsum()
-                plt.figure()
-                plt.plot((df["t_ms"] - df["t_ms"].iloc[0])/1000, df["energy_accumulated"])
-                plt.title("Accumulated Raw Energy (aenergy_a_delta sum)")
-                plt.xlabel("Time (s)")
-                plt.grid(True)
-                plt.show(block=False)
-        # Insert this option inside you7r Python tool's main selection menu
+                actual_raw = df["aenergy_raw"].sum()
+                expected_raw = ((ref_w * duration) / 3600.0) / session_constants["wh_lsb"]
+                
+                if actual_raw > 0 and expected_raw > 0:
+                    # AN-1118 Phase Calibration Formula
+                    phi_rad = math.acos(ref_pf)
+                    phi_deg = math.degrees(phi_rad)
+                    
+                    ratio = (actual_raw * ref_pf) / expected_raw
+                    # Constrain domain for acos to prevent math domain errors from noise
+                    ratio = max(min(ratio, 1.0), -1.0) 
+                    
+                    error_angle_deg = math.degrees(math.acos(ratio)) - phi_deg
+                    
+                    phcal = -1 * (error_angle_deg / (360.0 * 60.0)) * 893850
+                    
+                    # Convert to 10-bit sign-magnitude format
+                    phcal_int = int(phcal)
+                    if phcal_int < 0:
+                        phcal_hex = 0x200 | abs(phcal_int) # Set sign bit
+                    else:
+                        phcal_hex = phcal_int
+                        
+                    print(f"Phase Error Calculated: {error_angle_deg:.4f} degrees")
+                    print(f"--> Write to PHCALA Register: 0x{phcal_hex:03X}")
+
         elif choice == '7':
-            print("\n---> Streaming live 7kHz waveforms. Press Ctrl+C to stop and plot signal structure...")
+            # Waveform streaming block remains unchanged...
+            print("\n---> Streaming live 7kHz waveforms. Press Ctrl+C to stop...")
             wave_rows = []
             try:
                 with serial.Serial(PORT, BAUD, timeout=1) as ser:
                     ser.reset_input_buffer()
                     while True:
                         line = ser.readline().decode(errors="ignore").strip()
-                        if not line or line.startswith("WAVE"):
-                            continue
+                        if not line or line.startswith("WAVE"): continue
                         try:
                             parts = line.split(",")
                             if len(parts) == 2:
                                 wave_rows.append({"V_wave": int(parts[0]), "I_wave": int(parts[1])})
-                                # Stop after capturing roughly 3-4 full cycles for clean resolution 
-                                if len(wave_rows) >= 1000: 
-                                    break
-                        except ValueError:
-                            pass
-            except KeyboardInterrupt:
-                pass
+                                if len(wave_rows) >= 1000: break
+                        except ValueError: pass
+            except KeyboardInterrupt: pass
 
             if wave_rows:
                 w_df = pd.DataFrame(wave_rows)
                 fig, axes = plt.subplots(2, 1, figsize=(10, 6))
-                axes[0].plot(w_df["V_wave"], color='blue', label='Reconstructed Voltage Sine Wave')
-                axes[0].grid(True)
-                axes[0].legend()
-                
-                axes[1].plot(w_df["I_wave"], color='red', label='Reconstructed Current Sine Wave')
-                axes[1].grid(True)
-                axes[1].legend()
+                axes[0].plot(w_df["V_wave"], color='blue', label='Voltage Sine Wave')
+                axes[0].grid(True); axes[0].legend()
+                axes[1].plot(w_df["I_wave"], color='red', label='Current Sine Wave')
+                axes[1].grid(True); axes[1].legend()
                 plt.show()
 
 if __name__ == "__main__":
