@@ -1,4 +1,4 @@
-idf_component_register(SRCS "module_mqtt.c" "main.c"
+idf_component_register(SRCS "main.c" "module_mqtt.c"
                     "board_profile.c"
                     "module_relay.c"
                     "module_ledstrip.c"

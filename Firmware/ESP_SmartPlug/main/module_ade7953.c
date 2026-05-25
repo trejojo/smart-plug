@@ -31,6 +31,24 @@ static ade7953_config_t s_cfg = {0};
 static ade7953_calibration_t s_cal = {0};
 static bool s_initialized = false;
 
+static const ade7953_calibration_t ADE7953_DEFAULT_CALIBRATION = {
+    .volts_per_vrms_lsb = 0.00001903f,
+    .amps_per_irmsa_lsb = 0.00000076f,
+    .amps_per_irmsb_lsb = 0.00000076f,
+    .watts_per_awatt_lsb = 0.000000242f,
+    .watts_per_bwatt_lsb = 0.000000242f,
+    .vars_per_avar_lsb = 0.000000242f,
+    .vars_per_bvar_lsb = 0.000000242f,
+    .va_per_ava_lsb = 0.000000242f,
+    .va_per_bva_lsb = 0.000000242f,
+    .wh_per_aenergy_a_lsb = 1.48734953e-06f,
+    .wh_per_aenergy_b_lsb = 1.48734953e-06f,
+    .varh_per_renergy_a_lsb = 1.48734953e-06f,
+    .varh_per_renergy_b_lsb = 1.48734953e-06f,
+    .vah_per_apenergy_a_lsb = 1.48734953e-06f,
+    .vah_per_apenergy_b_lsb = 1.48734953e-06f,
+};
+
 static float s_total_active_energy_a_wh = 0.0f;
 static float s_total_active_energy_b_wh = 0.0f;
 static float s_total_reactive_energy_a_varh = 0.0f;
@@ -187,6 +205,7 @@ esp_err_t module_ade7953_init_with_config(const ade7953_config_t *config)
     }
 
     s_cfg = *config;
+    s_cal = ADE7953_DEFAULT_CALIBRATION;
     if (s_cfg.spi_clock_hz <= 0) {
         s_cfg.spi_clock_hz = ADE7953_SPI_DEFAULT_HZ;
     }
@@ -483,6 +502,16 @@ esp_err_t module_ade7953_read_version(uint8_t *version)
 esp_err_t module_ade7953_read_crc(uint32_t *crc)
 {
     return module_ade7953_read32(ADE7953_REG_CRC_32, crc);
+}
+
+esp_err_t module_ade7953_get_default_calibration(ade7953_calibration_t *out_cal)
+{
+    if (out_cal == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *out_cal = ADE7953_DEFAULT_CALIBRATION;
+    return ESP_OK;
 }
 
 void module_ade7953_set_calibration(const ade7953_calibration_t *cal)

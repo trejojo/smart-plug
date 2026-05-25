@@ -1,6 +1,7 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_system.h"
+#include "esp_attr.h"
 #include "nvs_flash.h"
 #include <inttypes.h>
 #include <stdio.h>
@@ -28,6 +29,56 @@ static TickType_t g_mqtt_connect_requested_tick = 0;
 
 static const char *MQTT_BROKER_IP = "192.168.137.1";
 static const uint16_t MQTT_BROKER_PORT = 1883;
+
+#ifndef ENABLE_WAVEFORM_STREAM
+#define ENABLE_WAVEFORM_STREAM 0
+#endif
+
+#ifndef ENABLE_IRQ_DEBUG_READBACK
+#define ENABLE_IRQ_DEBUG_READBACK 0
+#endif
+
+#define ADE7953_DEFAULT_AWGAIN_RAW 0x3DF9ADU
+#define ADE7953_DEFAULT_PHCALA_RAW ((uint16_t)(0x200U | 0x07FU))
+
+#if ENABLE_WAVEFORM_STREAM
+static TaskHandle_t s_wave_task = NULL;
+
+static void IRAM_ATTR ade7953_waveform_irq_handler(void *arg)
+{
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (s_wave_task != NULL) {
+        vTaskNotifyGiveFromISR(s_wave_task, &xHigherPriorityTaskWoken);
+    }
+    if (xHigherPriorityTaskWoken == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static void waveform_stream_task(void *pvParameters)
+{
+    while (true) {
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000)) == 0) {
+#if ENABLE_IRQ_DEBUG_READBACK
+            ade7953_events_t events = {0};
+            if (module_ade7953_read_events(&events, false) == ESP_OK) {
+                ESP_LOGW(TAG, "ADE IRQ debug: irq_a=0x%06" PRIX32 " irq_b=0x%06" PRIX32 " wsmp=%d cycend=%d",
+                         events.irq_a,
+                         events.irq_b,
+                         events.waveform_sample_ready,
+                         events.line_cycle_end);
+            }
+#endif
+            continue;
+        }
+
+        ade7953_raw_measurement_t raw = {0};
+        if (module_ade7953_read_raw_measurement(&raw, false, true) == ESP_OK) {
+            printf("WAVE,%" PRId32 ",%" PRId32 "\n", raw.v_waveform, raw.ia_waveform);
+        }
+    }
+}
+#endif
 
 typedef enum {
     STATUS_IDLE = 0,
@@ -92,18 +143,27 @@ static bool ade7953_service_and_should_trip(const ade7953_measurement_t *measure
     }
 
     ESP_LOGI(TAG,
-             "ADE raw: VRMS=%" PRIu32 " IRMSA=%" PRIu32 " IRMSB=%" PRIu32
-             " AWATT=%" PRId32 " BWATT=%" PRId32 " F=%.2f Hz PFA=%.3f PFB=%.3f IRQ_A=0x%06" PRIX32 " IRQ_B=0x%06" PRIX32,
+             "ADE cal: V=%.2fV IA=%.3fA IB=%.3fA PA=%.2fW PB=%.2fW "
+             "F=%.2fHz PFA=%.3f PFB=%.3f E_A=%.4fWh IRQ_A=0x%06" PRIX32 " IRQ_B=0x%06" PRIX32
+             " | raw VRMS=%" PRIu32 " IRMSA=%" PRIu32 " IRMSB=%" PRIu32 " AWATT=%" PRId32 " BWATT=%" PRId32,
+             measurement->voltage_vrms,
+             measurement->current_a_arms,
+             measurement->current_b_arms,
+             measurement->active_power_a_w,
+             measurement->active_power_b_w,
+             measurement->line_frequency_hz,
+             measurement->power_factor_a,
+             measurement->power_factor_b,
+             measurement->active_energy_a_wh_total,
+             measurement->raw.irq_a,
+             measurement->raw.irq_b,
              measurement->raw.vrms,
              measurement->raw.irmsa,
              measurement->raw.irmsb,
              measurement->raw.awatt,
              measurement->raw.bwatt,
-             measurement->line_frequency_hz,
-             measurement->power_factor_a,
-             measurement->power_factor_b,
-             measurement->raw.irq_a,
-             measurement->raw.irq_b);
+             measurement->raw.awatt,
+             measurement->raw.bwatt);
 
     ade7953_safety_limits_t limits = {
         .enable_hw_critical_trip = false,
@@ -182,6 +242,8 @@ static void setup_button_init(gpio_num_t gpio_num)
 
 static void ade7953_startup_config(void)
 {
+    const smartplug_board_pins_t *pins = smartplug_board_pins_get();
+
     ESP_ERROR_CHECK(module_ade7953_set_hpf(true));
 
     /* CT/shunt mode: keep digital integrators disabled. Enable only for Rogowski coils. */
@@ -194,12 +256,40 @@ static void ade7953_startup_config(void)
                                            ADE7953_PGA_GAIN_1,
                                            ADE7953_PGA_GAIN_1));
 
+    ESP_ERROR_CHECK(module_ade7953_write32(ADE7953_REG_AWGAIN_32, ADE7953_DEFAULT_AWGAIN_RAW));
+    ESP_ERROR_CHECK(module_ade7953_write16(ADE7953_REG_PHCALA, ADE7953_DEFAULT_PHCALA_RAW));
+    ESP_LOGI(TAG, "Applied ADE calibration registers: AWGAIN=0x%06X PHCALA=0x%03X",
+             ADE7953_DEFAULT_AWGAIN_RAW & 0x00FFFFFFU,
+             ADE7953_DEFAULT_PHCALA_RAW & 0x03FFU);
+
     ESP_ERROR_CHECK(module_ade7953_set_zero_cross_timeout_ms(100.0f));
 
     /* Use explicit safety masks to prevent false zero-cross timeout trips on the bench */
     const uint32_t raw_safe_irq_a = ADE7953_IRQ_A_SAG | ADE7953_IRQ_A_OV | ADE7953_IRQ_A_OIA;
     const uint32_t raw_safe_irq_b = ADE7953_IRQ_B_OIB;
     ESP_ERROR_CHECK(module_ade7953_configure_irq_masks(raw_safe_irq_a, raw_safe_irq_b));
+
+#if ENABLE_WAVEFORM_STREAM
+    ESP_ERROR_CHECK(module_ade7953_configure_irq_masks(ADE7953_IRQ_A_WSMP, 0));
+
+    ade7953_events_t startup_events = {0};
+    ESP_ERROR_CHECK(module_ade7953_read_events(&startup_events, true));
+
+    gpio_config_t irq_pin_cfg = {
+        .pin_bit_mask = 1ULL << pins->ade_irq_gpio,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_NEGEDGE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&irq_pin_cfg));
+    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(pins->ade_irq_gpio, ade7953_waveform_irq_handler, NULL));
+
+    if (xTaskCreate(waveform_stream_task, "ade7953_wave", 4096, NULL, 20, &s_wave_task) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create waveform stream task");
+    }
+#endif
 }
 
 void app_main(void)
@@ -260,6 +350,16 @@ void app_main(void)
         uint8_t ade_version = 0;
         if (module_ade7953_read_version(&ade_version) == ESP_OK) {
             ESP_LOGI(TAG, "ADE7953 version: 0x%02X", ade_version);
+        }
+        ade7953_calibration_t ade_cal = {0};
+        if (module_ade7953_get_default_calibration(&ade_cal) == ESP_OK) {
+            module_ade7953_set_calibration(&ade_cal);
+            ESP_LOGI(TAG,
+                     "Applied ADE scale calibration: kv=%.8f ki=%.8f kw=%.8e wh=%.8e",
+                     ade_cal.volts_per_vrms_lsb,
+                     ade_cal.amps_per_irmsa_lsb,
+                     ade_cal.watts_per_awatt_lsb,
+                     ade_cal.wh_per_aenergy_a_lsb);
         }
         ade7953_startup_config();
     } else {
@@ -368,6 +468,16 @@ void app_main(void)
 
             // ADE7953 Reading
             if (ade_init_ret == ESP_OK) {
+#if ENABLE_IRQ_DEBUG_READBACK && !ENABLE_WAVEFORM_STREAM
+                ade7953_events_t ade_events = {0};
+                if (module_ade7953_read_events(&ade_events, false) == ESP_OK) {
+                    if (ade_events.waveform_sample_ready || ade_events.line_cycle_end || ade_events.sag ||
+                        ade_events.overvoltage || ade_events.overcurrent_a || ade_events.overcurrent_b) {
+                        ESP_LOGI(TAG, "ADE IRQ debug: irq_a=0x%06" PRIX32 " irq_b=0x%06" PRIX32,
+                                 ade_events.irq_a, ade_events.irq_b);
+                    }
+                }
+#endif
                 esp_err_t ade_ret = module_ade7953_read_measurement(&measurement, true, true);
                 if (ade_ret == ESP_OK) {
                     ade_measurement_ok = true;

@@ -418,6 +418,7 @@ esp_err_t module_ade7953_read_version(uint8_t *version);
 esp_err_t module_ade7953_read_crc(uint32_t *crc);
 
 /* Calibration / scaling */
+esp_err_t module_ade7953_get_default_calibration(ade7953_calibration_t *out_cal);
 void module_ade7953_set_calibration(const ade7953_calibration_t *cal);
 void module_ade7953_get_calibration(ade7953_calibration_t *cal);
 void module_ade7953_reset_energy_totals(void);
