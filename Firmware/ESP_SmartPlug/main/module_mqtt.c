@@ -1,9 +1,10 @@
 #include "module_mqtt.h"
 #include "mqtt_client.h"
 #include "esp_log.h"
-#include "cJSON.h"
 #include "module_relay.h"
+#include <inttypes.h>
 #include <string.h>
+#include "CJson.h"
 
 static const char *TAG = "module_mqtt";
 
@@ -324,42 +325,55 @@ esp_err_t module_mqtt_publish_energy(float voltage_v, float current_a, float pow
 /**
  * @brief Publish combined status
  */
-esp_err_t module_mqtt_publish_status(float temp_celsius, float voltage_v, float current_a, float power_w, uint32_t energy_wh, bool relay_on)
+esp_err_t module_mqtt_publish_status(float temperature_c,
+                                     float vrms,
+                                     float irms,
+                                     float pf,
+                                     float active_power,
+                                     float reactive_power,
+                                     float frequency,
+                                     bool no_load,
+                                     uint32_t energy_wh,
+                                     bool relay_state)
 {
 	if (!module_mqtt_is_connected()) {
 		return ESP_ERR_INVALID_STATE;
 	}
 
-	cJSON *root = cJSON_CreateObject();
-	if (root == NULL) {
-		return ESP_ERR_NO_MEM;
-	}
+	char payload[256];
+	snprintf(payload, sizeof(payload),
+		     "{"
+		     "\"vrms\":%.2f,"
+		     "\"irms\":%.3f,"
+		     "\"pf\":%.3f,"
+		     "\"active_power\":%.2f,"
+		     "\"reactive_power\":%.2f,"
+		     "\"frequency\":%.2f,"
+		     "\"no_load\":%s,"
+		     "\"energy_wh\":%" PRIu32 ","
+		     "\"relay\":%s,"
+		     "\"tmp_c\":%.2f"
+		     "}",
+		     vrms,
+		     irms,
+		     pf,
+		     active_power,
+		     reactive_power,
+		     frequency,
+		     no_load ? "true" : "false",
+		     energy_wh,
+		     relay_state ? "true" : "false",
+		     temperature_c);
 
-	cJSON_AddStringToObject(root, "event_type", "HEARTBEAT");
-	cJSON_AddNumberToObject(root, "temperature", temp_celsius);
-	cJSON_AddNumberToObject(root, "voltage", voltage_v);
-	cJSON_AddNumberToObject(root, "current", current_a);
-	cJSON_AddNumberToObject(root, "power", power_w);
-	cJSON_AddNumberToObject(root, "energy", energy_wh);
-	cJSON_AddBoolToObject(root, "relay", relay_on);
-
-	char *payload = cJSON_PrintUnformatted(root);
-	if (payload == NULL) {
-		cJSON_Delete(root);
-		return ESP_ERR_NO_MEM;
-	}
-
+	ESP_LOGI(TAG, "Publishing status: %s", payload);
 	int msg_id = esp_mqtt_client_publish(mqtt_client, "smartplug/status", payload, 0, 1, 0);
-
-	cJSON_free(payload);
-	cJSON_Delete(root);
 
 	if (msg_id == -1) {
 		ESP_LOGE(TAG, "Failed to publish status");
 		return ESP_FAIL;
 	}
 
-	ESP_LOGI(TAG, "Published HEARTBEAT status (msg_id: %d)", msg_id);
+	ESP_LOGI(TAG, "Published status (msg_id: %d)", msg_id);
 	return ESP_OK;
 }
 

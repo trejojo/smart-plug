@@ -190,6 +190,15 @@ static bool ade7953_service_and_should_trip(const ade7953_measurement_t *measure
     return decision.trip;
 }
 
+static bool ade7953_measurement_has_no_load(const ade7953_measurement_t *measurement)
+{
+    if (measurement == NULL) {
+        return false;
+    }
+
+    return (measurement->raw.irq_a & ADE7953_IRQ_A_AP_NOLOADA) != 0;
+}
+
 // Dedicated FreeRTOS task to handle LED colors and blinking asynchronously
 static void led_control_task(void *pvParameters)
 {
@@ -503,7 +512,11 @@ void app_main(void)
                     temperature_c,
                     measurement.voltage_vrms,
                     measurement.current_a_arms,
+                    measurement.power_factor_a,
                     measurement.active_power_a_w,
+                    measurement.reactive_power_a_var,
+                    measurement.line_frequency_hz,
+                    ade7953_measurement_has_no_load(&measurement),
                     (uint32_t)(measurement.active_energy_a_wh_total + 0.5f),
                     g_relay_on);
                 if (mqtt_ret != ESP_OK) {
