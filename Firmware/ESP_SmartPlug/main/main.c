@@ -196,10 +196,10 @@ static bool ade7953_measurement_has_no_load(const ade7953_measurement_t *measure
         return false;
     }
 
-    return (measurement->raw.irq_a & ADE7953_IRQ_A_AP_NOLOADA) != 0;
+    return (measurement->raw.accmode & ADE7953_ACCMODE_ACTNLOAD_A) != 0;
 }
 
-// Dedicated FreeRTOS task to handle LED colors and blinking asynchronously
+// Dedicated FreeRTOS task to handle LED colors and blinking asynchronously (GRB Hardware Mapping)
 static void led_control_task(void *pvParameters)
 {
     bool toggle = false;
@@ -209,20 +209,32 @@ static void led_control_task(void *pvParameters)
 
         switch (current) {
             case STATUS_BLE_WAITING:
+                // Blue channel is unaffected by GRB inversion
                 b = toggle ? 32 : 0; // Blink Blue
                 break;
+                
             case STATUS_WIFI_CONNECTING:
                 b = 32;              // Solid Blue
                 break;
+                
             case STATUS_MQTT_CONNECTING:
-                g = toggle ? 32 : 0; // Blink Green
+                // Hardware expects GRB, so writing to r lights up physical Green
+                r = toggle ? 32 : 0; // Blink Green
+                g = 0;
                 break;
+                
             case STATUS_MQTT_CONNECTED:
-                g = 32;              // Solid Green
+                // Hardware expects GRB, so writing to r lights up physical Green
+                r = 32;              // Solid Green
+                g = 0; 
                 break;
+                
+
             case STATUS_ERROR:
-                r = 32;              // Solid Red
-                break;
+                // Hardware expects GRB, so writing to g lights up physical Red
+                r = 0;
+                g = 32;              // Solid Red
+                break;  
             case STATUS_IDLE:
             default:
                 // Off
