@@ -23,6 +23,8 @@
 #define ADE7953_GAIN_REG_NOMINAL        (0x400000UL)
 #define ADE7953_GAIN_REG_MIN            (0x200000UL)
 #define ADE7953_GAIN_REG_MAX            (0x600000UL)
+#define ADE7953_DEFAULT_AWGAIN_RAW      (0x3DF9ADUL)
+#define ADE7953_DEFAULT_PHCALA_RAW      ((uint16_t)(0x200U | 0x07FU))
 
 static const char *TAG = "ade7953";
 
@@ -514,6 +516,47 @@ esp_err_t module_ade7953_get_default_calibration(ade7953_calibration_t *out_cal)
     return ESP_OK;
 }
 
+esp_err_t module_ade7953_apply_smartplug_startup(const ade7953_smartplug_policy_t *policy)
+{
+    if (policy == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_RETURN_ON_ERROR(module_ade7953_set_hpf(true), TAG, "set HPF failed");
+
+    /* CT/shunt mode: keep digital integrators disabled. Enable only for Rogowski coils. */
+    ESP_RETURN_ON_ERROR(module_ade7953_set_integrators(false, false), TAG, "set integrators failed");
+
+    /* Restore the calibrated PGA gain limits.
+       Voltage Channel = Gain of 2 (250mV scale to accommodate the 997:1 divider).
+       Current Channels = Gain of 1. */
+    ESP_RETURN_ON_ERROR(module_ade7953_set_pga(ADE7953_PGA_GAIN_2,
+                                               ADE7953_PGA_GAIN_1,
+                                               ADE7953_PGA_GAIN_1),
+                        TAG,
+                        "set PGA failed");
+
+    ESP_RETURN_ON_ERROR(module_ade7953_write32(ADE7953_REG_AWGAIN_32, ADE7953_DEFAULT_AWGAIN_RAW), TAG, "write AWGAIN failed");
+    ESP_RETURN_ON_ERROR(module_ade7953_write16(ADE7953_REG_PHCALA, ADE7953_DEFAULT_PHCALA_RAW), TAG, "write PHCALA failed");
+
+    ESP_LOGI(TAG, "Applied ADE calibration registers: AWGAIN=0x%06X PHCALA=0x%03X",
+             ADE7953_DEFAULT_AWGAIN_RAW & 0x00FFFFFFU,
+             ADE7953_DEFAULT_PHCALA_RAW & 0x03FFU);
+
+    ESP_RETURN_ON_ERROR(module_ade7953_set_zero_cross_timeout_ms(100.0f), TAG, "set ZX timeout failed");
+    ESP_RETURN_ON_ERROR(module_ade7953_set_overvoltage_overcurrent_from_rms(policy->safety_limits.max_voltage_vrms,
+                                                                            policy->safety_limits.max_current_a_arms),
+                        TAG,
+                        "set OV/OI thresholds failed");
+
+    /* Hardware trip path: unmask only overvoltage and overcurrent A. */
+    const uint32_t raw_safe_irq_a = ADE7953_IRQ_A_OV | ADE7953_IRQ_A_OIA;
+    const uint32_t raw_safe_irq_b = 0;
+    ESP_RETURN_ON_ERROR(module_ade7953_configure_irq_masks(raw_safe_irq_a, raw_safe_irq_b), TAG, "configure IRQ masks failed");
+
+    return ESP_OK;
+}
+
 void module_ade7953_set_calibration(const ade7953_calibration_t *cal)
 {
     if (cal != NULL) {
@@ -887,6 +930,34 @@ esp_err_t module_ade7953_set_overvoltage_overcurrent_raw(uint32_t ov_level_raw, 
 {
     ESP_RETURN_ON_ERROR(module_ade7953_write32(ADE7953_REG_OVLVL_32, ov_level_raw & ADE7953_RAW24_MASK), TAG, "write OVLVL failed");
     ESP_RETURN_ON_ERROR(module_ade7953_write32(ADE7953_REG_OILVL_32, oi_level_raw & ADE7953_RAW24_MASK), TAG, "write OILVL failed");
+    return ESP_OK;
+}
+
+esp_err_t module_ade7953_set_overvoltage_overcurrent_from_rms(float max_vrms,
+                                                              float max_iarms)
+{
+    if (max_vrms <= 0.0f || max_iarms <= 0.0f) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_cal.volts_per_vrms_lsb <= 0.0f || s_cal.amps_per_irmsa_lsb <= 0.0f) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* OVLVL and OILVL compare against instantaneous waveform magnitude, not RMS.
+     * Convert RMS limits into peak ADC codes using the active calibration constants. */
+    uint32_t ov_limit = (uint32_t)(((max_vrms / s_cal.volts_per_vrms_lsb) * 1.4142f) + 0.5f);
+    uint32_t oia_limit = (uint32_t)(((max_iarms / s_cal.amps_per_irmsa_lsb) * 1.4142f) + 0.5f);
+    ov_limit = clamp_u32(ov_limit, 0, ADE7953_RAW24_MASK);
+    oia_limit = clamp_u32(oia_limit, 0, ADE7953_RAW24_MASK);
+
+    ESP_RETURN_ON_ERROR(module_ade7953_write32(ADE7953_REG_OVLVL_32, ov_limit), TAG, "write OVLVL failed");
+    ESP_RETURN_ON_ERROR(module_ade7953_write32(ADE7953_REG_OILVL_32, oia_limit), TAG, "write OILVL failed");
+
+    ESP_LOGI(TAG, "Dynamic ADE hardware limits updated: max_vrms=%.2f max_iarms=%.3f OVLVL=%" PRIu32 " OILVL=%" PRIu32,
+             max_vrms,
+             max_iarms,
+             ov_limit,
+             oia_limit);
     return ESP_OK;
 }
 

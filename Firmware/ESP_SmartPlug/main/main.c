@@ -30,6 +30,10 @@ static TickType_t g_mqtt_connect_requested_tick = 0;
 static const char *MQTT_BROKER_IP = "192.168.137.1";
 static const uint16_t MQTT_BROKER_PORT = 1883;
 
+static TaskHandle_t s_main_task_handle = NULL;
+static gpio_num_t s_relay_gpio = GPIO_NUM_NC;
+static gpio_num_t s_ade_irq_gpio = GPIO_NUM_NC;
+
 #ifndef ENABLE_WAVEFORM_STREAM
 #define ENABLE_WAVEFORM_STREAM 0
 #endif
@@ -37,9 +41,6 @@ static const uint16_t MQTT_BROKER_PORT = 1883;
 #ifndef ENABLE_IRQ_DEBUG_READBACK
 #define ENABLE_IRQ_DEBUG_READBACK 0
 #endif
-
-#define ADE7953_DEFAULT_AWGAIN_RAW 0x3DF9ADU
-#define ADE7953_DEFAULT_PHCALA_RAW ((uint16_t)(0x200U | 0x07FU))
 
 #if ENABLE_WAVEFORM_STREAM
 static TaskHandle_t s_wave_task = NULL;
@@ -98,6 +99,33 @@ static void aice_set_status(aice_status_t s)
     g_current_status = s;
 }
 
+static const ade7953_smartplug_policy_t g_ade_policy = {
+    .safety_limits = {
+        .enable_hw_critical_trip = false,
+        .enable_rms_voltage_limits = false, /* enable after calibration */
+        .enable_rms_current_limit = false,  /* enable after calibration */
+        .enable_active_power_limit = false, /* enable after calibration */
+        .min_voltage_vrms = 95.0f,
+        .max_voltage_vrms = 145.0f,
+        .max_current_a_arms = 5.5f,
+        .max_active_power_w = 700.0f,
+    },
+};
+
+typedef struct {
+    gpio_int_type_t intr_type;
+    gpio_pullup_t pull_up_en;
+    gpio_pulldown_t pull_down_en;
+    uint32_t isr_service_flags;
+} ade_irq_policy_t;
+
+static const ade_irq_policy_t g_ade_irq_policy = {
+    .intr_type = GPIO_INTR_NEGEDGE,
+    .pull_up_en = GPIO_PULLUP_ENABLE,
+    .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    .isr_service_flags = 0,
+};
+
 static void aice_refresh_network_state(bool credentials_in_nvs)
 {
     const bool wifi_connected = module_wifi_is_connected();
@@ -136,9 +164,10 @@ static void aice_refresh_network_state(bool credentials_in_nvs)
     }
 }
 
-static bool ade7953_service_and_should_trip(const ade7953_measurement_t *measurement)
+static bool ade7953_service_and_should_trip(const ade7953_measurement_t *measurement,
+                                            const ade7953_safety_limits_t *limits)
 {
-    if (measurement == NULL) {
+    if (measurement == NULL || limits == NULL) {
         return false;
     }
 
@@ -165,19 +194,8 @@ static bool ade7953_service_and_should_trip(const ade7953_measurement_t *measure
              measurement->raw.awatt,
              measurement->raw.bwatt);
 
-    ade7953_safety_limits_t limits = {
-        .enable_hw_critical_trip = false,
-        .enable_rms_voltage_limits = false, /* enable after calibration */
-        .enable_rms_current_limit = false,  /* enable after calibration */
-        .enable_active_power_limit = false, /* enable after calibration */
-        .min_voltage_vrms = 95.0f,
-        .max_voltage_vrms = 145.0f,
-        .max_current_a_arms = 5.5f,
-        .max_active_power_w = 700.0f,
-    };
-
     ade7953_safety_decision_t decision;
-    module_ade7953_evaluate_safety(measurement, &limits, &decision);
+    module_ade7953_evaluate_safety(measurement, limits, &decision);
     if (decision.trip) {
         ESP_LOGE(TAG, "ADE7953 critical event: opening relay. hw=%d ov=%d uv=%d oc=%d op=%d",
                  decision.ade_hw_critical_event,
@@ -197,6 +215,45 @@ static bool ade7953_measurement_has_no_load(const ade7953_measurement_t *measure
     }
 
     return (measurement->raw.accmode & ADE7953_ACCMODE_ACTNLOAD_A) != 0;
+}
+
+static void IRAM_ATTR ade7953_safety_irq_handler(void *arg)
+{
+    if (s_relay_gpio != GPIO_NUM_NC) {
+        gpio_set_level(s_relay_gpio, 0);
+    }
+
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (s_main_task_handle != NULL) {
+        vTaskNotifyGiveFromISR(s_main_task_handle, &xHigherPriorityTaskWoken);
+    }
+    if (xHigherPriorityTaskWoken == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static void ade_irq_isr_setup(const smartplug_board_pins_t *pins, const ade_irq_policy_t *policy)
+{
+    if (pins == NULL || policy == NULL) {
+        return;
+    }
+
+    s_ade_irq_gpio = pins->ade_irq_gpio;
+
+    gpio_config_t irq_pin_cfg = {
+        .pin_bit_mask = 1ULL << pins->ade_irq_gpio,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = policy->pull_up_en,
+        .pull_down_en = policy->pull_down_en,
+        .intr_type = policy->intr_type,
+    };
+    ESP_ERROR_CHECK(gpio_config(&irq_pin_cfg));
+
+    esp_err_t isr_ret = gpio_install_isr_service(policy->isr_service_flags);
+    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(isr_ret);
+    }
+    ESP_ERROR_CHECK(gpio_isr_handler_add(pins->ade_irq_gpio, ade7953_safety_irq_handler, NULL));
 }
 
 // Dedicated FreeRTOS task to handle LED colors and blinking asynchronously (GRB Hardware Mapping)
@@ -261,61 +318,11 @@ static void setup_button_init(gpio_num_t gpio_num)
     ESP_ERROR_CHECK(gpio_config(&button_cfg));
 }
 
-static void ade7953_startup_config(void)
-{
-    const smartplug_board_pins_t *pins = smartplug_board_pins_get();
-
-    ESP_ERROR_CHECK(module_ade7953_set_hpf(true));
-
-    /* CT/shunt mode: keep digital integrators disabled. Enable only for Rogowski coils. */
-    ESP_ERROR_CHECK(module_ade7953_set_integrators(false, false));
-
-    /* Restore the calibrated PGA gain limits. 
-       Voltage Channel = Gain of 2 (250mV scale to accommodate the 997:1 divider). 
-       Current Channels = Gain of 1. */
-    ESP_ERROR_CHECK(module_ade7953_set_pga(ADE7953_PGA_GAIN_2,
-                                           ADE7953_PGA_GAIN_1,
-                                           ADE7953_PGA_GAIN_1));
-
-    ESP_ERROR_CHECK(module_ade7953_write32(ADE7953_REG_AWGAIN_32, ADE7953_DEFAULT_AWGAIN_RAW));
-    ESP_ERROR_CHECK(module_ade7953_write16(ADE7953_REG_PHCALA, ADE7953_DEFAULT_PHCALA_RAW));
-    ESP_LOGI(TAG, "Applied ADE calibration registers: AWGAIN=0x%06X PHCALA=0x%03X",
-             ADE7953_DEFAULT_AWGAIN_RAW & 0x00FFFFFFU,
-             ADE7953_DEFAULT_PHCALA_RAW & 0x03FFU);
-
-    ESP_ERROR_CHECK(module_ade7953_set_zero_cross_timeout_ms(100.0f));
-
-    /* Use explicit safety masks to prevent false zero-cross timeout trips on the bench */
-    const uint32_t raw_safe_irq_a = ADE7953_IRQ_A_SAG | ADE7953_IRQ_A_OV | ADE7953_IRQ_A_OIA;
-    const uint32_t raw_safe_irq_b = ADE7953_IRQ_B_OIB;
-    ESP_ERROR_CHECK(module_ade7953_configure_irq_masks(raw_safe_irq_a, raw_safe_irq_b));
-
-#if ENABLE_WAVEFORM_STREAM
-    ESP_ERROR_CHECK(module_ade7953_configure_irq_masks(ADE7953_IRQ_A_WSMP, 0));
-
-    ade7953_events_t startup_events = {0};
-    ESP_ERROR_CHECK(module_ade7953_read_events(&startup_events, true));
-
-    gpio_config_t irq_pin_cfg = {
-        .pin_bit_mask = 1ULL << pins->ade_irq_gpio,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_NEGEDGE,
-    };
-    ESP_ERROR_CHECK(gpio_config(&irq_pin_cfg));
-    ESP_ERROR_CHECK(gpio_install_isr_service(0));
-    ESP_ERROR_CHECK(gpio_isr_handler_add(pins->ade_irq_gpio, ade7953_waveform_irq_handler, NULL));
-
-    if (xTaskCreate(waveform_stream_task, "ade7953_wave", 4096, NULL, 20, &s_wave_task) != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create waveform stream task");
-    }
-#endif
-}
-
 void app_main(void)
 {
     const smartplug_board_pins_t *pins = smartplug_board_pins_get();
+    s_main_task_handle = xTaskGetCurrentTaskHandle();
+    s_relay_gpio = pins->relay_gpio;
 
     esp_log_level_set("aice_smartplug", ESP_LOG_INFO);
     ESP_LOGI(TAG, "AICE bring-up boot (%s)", smartplug_board_profile_name());
@@ -382,7 +389,8 @@ void app_main(void)
                      ade_cal.watts_per_awatt_lsb,
                      ade_cal.wh_per_aenergy_a_lsb);
         }
-        ade7953_startup_config();
+        ESP_ERROR_CHECK(module_ade7953_apply_smartplug_startup(&g_ade_policy));
+        ade_irq_isr_setup(pins, &g_ade_irq_policy);
     } else {
         ESP_LOGE(TAG, "ADE7953 init failed, continuing without metering: %s", esp_err_to_name(ade_init_ret));
     }
@@ -398,6 +406,11 @@ void app_main(void)
     bool button_was_pressed = false;
     
     while (true) {
+        bool ade_irq_pending = false;
+        while (ulTaskNotifyTake(pdTRUE, 0) > 0) {
+            ade_irq_pending = true;
+        }
+
         int button_level = gpio_get_level(pins->setup_bt_button);
 
         // -------------------------------------------------------------
@@ -489,6 +502,21 @@ void app_main(void)
 
             // ADE7953 Reading
             if (ade_init_ret == ESP_OK) {
+                if (ade_irq_pending) {
+                    ade7953_events_t safety_events = {0};
+                    if (module_ade7953_read_events(&safety_events, true) == ESP_OK) {
+                        ESP_LOGE(TAG, "ADE safety IRQ: irq_a=0x%06" PRIX32 " irq_b=0x%06" PRIX32 " ov=%d oia=%d oib=%d accmode=0x%06" PRIX32,
+                                 safety_events.irq_a,
+                                 safety_events.irq_b,
+                                 safety_events.overvoltage,
+                                 safety_events.overcurrent_a,
+                                 safety_events.overcurrent_b,
+                                 safety_events.accmode);
+                    } else {
+                        ESP_LOGW(TAG, "ADE safety IRQ occurred, but SPI diagnostics failed");
+                    }
+                    ade_trip = true;
+                }
 #if ENABLE_IRQ_DEBUG_READBACK && !ENABLE_WAVEFORM_STREAM
                 ade7953_events_t ade_events = {0};
                 if (module_ade7953_read_events(&ade_events, false) == ESP_OK) {
@@ -502,7 +530,7 @@ void app_main(void)
                 esp_err_t ade_ret = module_ade7953_read_measurement(&measurement, true, true);
                 if (ade_ret == ESP_OK) {
                     ade_measurement_ok = true;
-                    ade_trip = ade7953_service_and_should_trip(&measurement);
+                    ade_trip = ade7953_service_and_should_trip(&measurement, &g_ade_policy.safety_limits);
                 } else {
                     ESP_LOGW(TAG, "ADE7953 read failed: %s", esp_err_to_name(ade_ret));
                     sensor_error = true;

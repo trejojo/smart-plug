@@ -389,6 +389,10 @@ typedef struct {
     float max_active_power_w;
 } ade7953_safety_limits_t;
 
+typedef struct {
+    ade7953_safety_limits_t safety_limits;
+} ade7953_smartplug_policy_t;
+
 /* Init / deinit */
 esp_err_t module_ade7953_get_default_config(ade7953_config_t *out_config);
 esp_err_t module_ade7953_init(void);
@@ -422,6 +426,7 @@ esp_err_t module_ade7953_get_default_calibration(ade7953_calibration_t *out_cal)
 void module_ade7953_set_calibration(const ade7953_calibration_t *cal);
 void module_ade7953_get_calibration(ade7953_calibration_t *cal);
 void module_ade7953_reset_energy_totals(void);
+esp_err_t module_ade7953_apply_smartplug_startup(const ade7953_smartplug_policy_t *policy);
 esp_err_t module_ade7953_calibrate_rms_from_reference(float reference_vrms,
                                                        float reference_iarms,
                                                        float reference_ibarms);
@@ -453,6 +458,8 @@ esp_err_t module_ade7953_set_current_zx_source_b(bool use_current_b);
 esp_err_t module_ade7953_set_zero_cross_timeout_ms(float timeout_ms);
 esp_err_t module_ade7953_set_sag_threshold_raw(uint8_t half_cycles, uint32_t sag_level_raw);
 esp_err_t module_ade7953_set_overvoltage_overcurrent_raw(uint32_t ov_level_raw, uint32_t oi_level_raw);
+esp_err_t module_ade7953_set_overvoltage_overcurrent_from_rms(float max_vrms,
+                                                              float max_iarms);
 esp_err_t module_ade7953_set_no_load_thresholds_raw(uint32_t active_noload_raw,
                                                     uint32_t reactive_noload_raw,
                                                     uint32_t apparent_noload_raw);
