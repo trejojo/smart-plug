@@ -11,6 +11,98 @@ static const char *TAG = "module_mqtt";
 /* MQTT client handle */
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 static bool mqtt_connected = false;
+static module_mqtt_safety_limits_handler_t s_safety_limits_handler = NULL;
+static void *s_safety_limits_handler_user_data = NULL;
+
+static bool mqtt_topic_matches(const esp_mqtt_event_handle_t event, const char *topic)
+{
+	if (event == NULL || topic == NULL) {
+		return false;
+	}
+
+	size_t topic_len = strlen(topic);
+	return event->topic_len == (int)topic_len && strncmp(event->topic, topic, topic_len) == 0;
+}
+
+static void publish_safety_limits_ack(float max_vrms, float max_iarms, bool accepted, const char *reason)
+{
+	char ack_payload[256];
+	snprintf(ack_payload, sizeof(ack_payload),
+	         "{"
+	         "\"event_type\":\"SAFETY_LIMITS_UPDATE\","
+	         "\"accepted\":%s,"
+	         "\"max_vrms\":%.2f,"
+	         "\"max_iarms\":%.3f,"
+	         "\"reason\":\"%s\""
+	         "}",
+	         accepted ? "true" : "false",
+	         max_vrms,
+	         max_iarms,
+	         reason != NULL ? reason : "unknown");
+
+	int ack_msg_id = esp_mqtt_client_publish(mqtt_client, "aice/status", ack_payload, 0, 1, 0);
+	if (ack_msg_id == -1) {
+		ESP_LOGE(TAG, "Failed to publish safety-limit acknowledgment");
+	} else {
+		ESP_LOGI(TAG, "Published safety-limit acknowledgment: %s (msg_id: %d)", ack_payload, ack_msg_id);
+	}
+}
+
+static void handle_safety_limits_command(const esp_mqtt_event_handle_t event)
+{
+	if (event == NULL || event->data == NULL || event->data_len <= 0) {
+		ESP_LOGW(TAG, "Ignoring empty safety-limit command");
+		publish_safety_limits_ack(0.0f, 0.0f, false, "empty payload");
+		return;
+	}
+
+	if (event->data_len >= 256) {
+		ESP_LOGW(TAG, "Safety-limit command too large: %d bytes", event->data_len);
+		publish_safety_limits_ack(0.0f, 0.0f, false, "payload too large");
+		return;
+	}
+
+	char payload[256];
+	memcpy(payload, event->data, (size_t)event->data_len);
+	payload[event->data_len] = '\0';
+
+	cJSON *root = cJSON_Parse(payload);
+	if (root == NULL) {
+		ESP_LOGW(TAG, "Invalid safety-limit JSON: %s", payload);
+		publish_safety_limits_ack(0.0f, 0.0f, false, "invalid json");
+		return;
+	}
+
+	cJSON *max_vrms_item = cJSON_GetObjectItemCaseSensitive(root, "max_vrms");
+	cJSON *max_iarms_item = cJSON_GetObjectItemCaseSensitive(root, "max_iarms");
+	if (!cJSON_IsNumber(max_vrms_item) || !cJSON_IsNumber(max_iarms_item)) {
+		ESP_LOGW(TAG, "Safety-limit JSON missing numeric max_vrms/max_iarms");
+		publish_safety_limits_ack(0.0f, 0.0f, false, "missing numeric fields");
+		cJSON_Delete(root);
+		return;
+	}
+
+	float max_vrms = (float)max_vrms_item->valuedouble;
+	float max_iarms = (float)max_iarms_item->valuedouble;
+	ESP_LOGI(TAG, "Received safety-limit command: max_vrms=%.2f max_iarms=%.3f", max_vrms, max_iarms);
+
+	esp_err_t apply_ret = ESP_OK;
+	if (s_safety_limits_handler != NULL) {
+		apply_ret = s_safety_limits_handler(max_vrms, max_iarms, s_safety_limits_handler_user_data);
+	} else {
+		apply_ret = ESP_ERR_INVALID_STATE;
+	}
+	publish_safety_limits_ack(max_vrms, max_iarms, apply_ret == ESP_OK, apply_ret == ESP_OK ? "applied" : esp_err_to_name(apply_ret));
+
+	cJSON_Delete(root);
+}
+
+esp_err_t module_mqtt_set_safety_limits_handler(module_mqtt_safety_limits_handler_t handler, void *user_data)
+{
+	s_safety_limits_handler = handler;
+	s_safety_limits_handler_user_data = user_data;
+	return ESP_OK;
+}
 
 /**
  * @brief MQTT event handler
@@ -23,8 +115,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 		case MQTT_EVENT_CONNECTED:
 			ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
 			mqtt_connected = true;
-			/* Subscribe to receive GUI commands */
+			/* Subscribe to receive GUI commands and safety-limit updates */
 			esp_mqtt_client_subscribe(mqtt_client, "smartplug/cmd", 0);
+			esp_mqtt_client_subscribe(mqtt_client, "aice/cmd", 0);
 			break;
 
 		case MQTT_EVENT_DISCONNECTED:
@@ -50,7 +143,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 			ESP_LOGI(TAG, "DATA=%.*s", event->data_len, event->data);
 			
 			/* Process incoming commands from GUI */
-			if (strncmp(event->topic, "smartplug/cmd", event->topic_len) == 0) {
+			if (mqtt_topic_matches(event, "aice/cmd")) {
+				handle_safety_limits_command(event);
+			} else if (mqtt_topic_matches(event, "smartplug/cmd")) {
 				if (strncmp(event->data, "RELAY_ON", event->data_len) == 0) {
 					ESP_LOGW(TAG, "Command received: Turning relay ON");
 					module_relay_set(true);
@@ -391,6 +486,8 @@ esp_err_t module_mqtt_disconnect(void)
 	esp_mqtt_client_destroy(mqtt_client);
 	mqtt_client = NULL;
 	mqtt_connected = false;
+	s_safety_limits_handler = NULL;
+	s_safety_limits_handler_user_data = NULL;
 
 	return ESP_OK;
 }

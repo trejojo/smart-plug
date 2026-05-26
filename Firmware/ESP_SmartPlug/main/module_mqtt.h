@@ -3,12 +3,19 @@
 #include "esp_err.h"
 #include <stdbool.h>
 
+typedef esp_err_t (*module_mqtt_safety_limits_handler_t)(float max_vrms, float max_iarms, void *user_data);
+
 /**
  * @brief Initialize MQTT module
  *
  * @return ESP_OK on success, error code otherwise
  */
 esp_err_t module_mqtt_init(void);
+
+/**
+ * @brief Register a handler for MQTT safety-limit commands on topic aice/cmd
+ */
+esp_err_t module_mqtt_set_safety_limits_handler(module_mqtt_safety_limits_handler_t handler, void *user_data);
 
 /**
  * @brief Connect to MQTT broker

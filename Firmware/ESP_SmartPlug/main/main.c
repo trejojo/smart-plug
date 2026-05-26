@@ -99,7 +99,7 @@ static void aice_set_status(aice_status_t s)
     g_current_status = s;
 }
 
-static const ade7953_smartplug_policy_t g_ade_policy = {
+static ade7953_smartplug_policy_t g_ade_policy = {
     .safety_limits = {
         .enable_hw_critical_trip = false,
         .enable_rms_voltage_limits = false, /* enable after calibration */
@@ -162,6 +162,27 @@ static void aice_refresh_network_state(bool credentials_in_nvs)
         ESP_LOGW(TAG, "MQTT connection attempt timed out; allowing retry");
         g_mqtt_connect_requested = false;
     }
+}
+
+static esp_err_t aice_apply_safety_limits_update(float max_vrms, float max_iarms, void *user_data)
+{
+    (void)user_data;
+
+    if (max_vrms <= 0.0f || max_iarms <= 0.0f) {
+        ESP_LOGW(TAG, "Ignoring invalid safety-limit update: max_vrms=%.2f max_iarms=%.3f", max_vrms, max_iarms);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    g_ade_policy.safety_limits.max_voltage_vrms = max_vrms;
+    g_ade_policy.safety_limits.max_current_a_arms = max_iarms;
+
+    ESP_LOGI(TAG, "Updating ADE safety limits from MQTT: max_vrms=%.2f max_iarms=%.3f", max_vrms, max_iarms);
+    if (module_ade7953_set_overvoltage_overcurrent_from_rms(max_vrms, max_iarms) != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to apply updated ADE hardware thresholds");
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
 }
 
 static bool ade7953_service_and_should_trip(const ade7953_measurement_t *measurement,
@@ -343,6 +364,7 @@ void app_main(void)
     ESP_ERROR_CHECK(module_ble_init());
     ESP_ERROR_CHECK(module_wifi_init());
     ESP_ERROR_CHECK(module_mqtt_init());
+    ESP_ERROR_CHECK(module_mqtt_set_safety_limits_handler(aice_apply_safety_limits_update, NULL));
 
     bool credentials_in_nvs = module_nvs_credentials_exist();
     if (credentials_in_nvs) {

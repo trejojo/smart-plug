@@ -943,10 +943,12 @@ esp_err_t module_ade7953_set_overvoltage_overcurrent_from_rms(float max_vrms,
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* OVLVL and OILVL compare against instantaneous waveform magnitude, not RMS.
-     * Convert RMS limits into peak ADC codes using the active calibration constants. */
-    uint32_t ov_limit = (uint32_t)(((max_vrms / s_cal.volts_per_vrms_lsb) * 1.4142f) + 0.5f);
-    uint32_t oia_limit = (uint32_t)(((max_iarms / s_cal.amps_per_irmsa_lsb) * 1.4142f) + 0.5f);
+    /* The ADE7953's internal DSP scales RMS registers to match instantaneous peak
+     * magnitudes, so the raw RMS target is already in the same units as the
+     * OVLVL/OILVL instantaneous threshold registers. Convert using the active
+     * calibration constants (`s_cal`) without applying a sqrt(2) multiplier. */
+    uint32_t ov_limit = (uint32_t)((max_vrms / s_cal.volts_per_vrms_lsb) + 0.5f);
+    uint32_t oia_limit = (uint32_t)((max_iarms / s_cal.amps_per_irmsa_lsb) + 0.5f);
     ov_limit = clamp_u32(ov_limit, 0, ADE7953_RAW24_MASK);
     oia_limit = clamp_u32(oia_limit, 0, ADE7953_RAW24_MASK);
 
