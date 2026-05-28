@@ -933,33 +933,30 @@ esp_err_t module_ade7953_set_overvoltage_overcurrent_raw(uint32_t ov_level_raw, 
     return ESP_OK;
 }
 
-esp_err_t module_ade7953_set_overvoltage_overcurrent_from_rms(float max_vrms,
-                                                              float max_iarms)
+esp_err_t module_ade7953_set_overvoltage_overcurrent_from_rms(float max_vrms, float max_iarms)
 {
-    if (max_vrms <= 0.0f || max_iarms <= 0.0f) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (s_cal.volts_per_vrms_lsb <= 0.0f || s_cal.amps_per_irmsa_lsb <= 0.0f) {
-        return ESP_ERR_INVALID_STATE;
-    }
+    // Use your official structure values directly to calculate LSB thresholds
+    const float kv_const = ADE7953_DEFAULT_CALIBRATION.volts_per_vrms_lsb;
+    const float ki_const = ADE7953_DEFAULT_CALIBRATION.amps_per_irmsa_lsb;
 
-    /* The ADE7953's internal DSP scales RMS registers to match instantaneous peak
-     * magnitudes, so the raw RMS target is already in the same units as the
-     * OVLVL/OILVL instantaneous threshold registers. Convert using the active
-     * calibration constants (`s_cal`) without applying a sqrt(2) multiplier. */
-    uint32_t ov_limit = (uint32_t)((max_vrms / s_cal.volts_per_vrms_lsb) + 0.5f);
-    uint32_t oia_limit = (uint32_t)((max_iarms / s_cal.amps_per_irmsa_lsb) + 0.5f);
-    ov_limit = clamp_u32(ov_limit, 0, ADE7953_RAW24_MASK);
-    oia_limit = clamp_u32(oia_limit, 0, ADE7953_RAW24_MASK);
+    // Scale the target RMS values to raw values. 
+    // We apply the * 1.4142f peak factor here because OVLVL and OILVL registers
+    // are compared sample-by-sample against the raw wave peak (per section 0x224/0x225).
+    uint32_t ov_limit = (uint32_t)((max_vrms / kv_const) * 1.4142f);
+    uint32_t oia_limit = (uint32_t)((max_iarms / ki_const) * 1.4142f);
 
-    ESP_RETURN_ON_ERROR(module_ade7953_write32(ADE7953_REG_OVLVL_32, ov_limit), TAG, "write OVLVL failed");
-    ESP_RETURN_ON_ERROR(module_ade7953_write32(ADE7953_REG_OILVL_32, oia_limit), TAG, "write OILVL failed");
+    // Explicit clamp to the ADE's 24-bit unsigned maximum value (8,388,607)
+    // This safely keeps the register from wrapping around to 0 if a high threshold is set.
+    if (ov_limit > 8388607) ov_limit = 8388607;
+    if (oia_limit > 8388607) oia_limit = 8388607;
+
+    // Target the datasheet 32-bit offset memory mapping zones (0x324 and 0x325)
+    ESP_RETURN_ON_ERROR(module_ade7953_write32(0x324, ov_limit), TAG, "write OVLVL failed");
+    ESP_RETURN_ON_ERROR(module_ade7953_write32(0x325, oia_limit), TAG, "write OILVL failed");
 
     ESP_LOGI(TAG, "Dynamic ADE hardware limits updated: max_vrms=%.2f max_iarms=%.3f OVLVL=%" PRIu32 " OILVL=%" PRIu32,
-             max_vrms,
-             max_iarms,
-             ov_limit,
-             oia_limit);
+             max_vrms, max_iarms, ov_limit, oia_limit);
+
     return ESP_OK;
 }
 
