@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "module_relay.h"
 #include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 #include "CJson.h"
 
@@ -46,6 +47,62 @@ static void publish_safety_limits_ack(float max_vrms, float max_iarms, bool acce
 	} else {
 		ESP_LOGI(TAG, "Published safety-limit acknowledgment: %s (msg_id: %d)", ack_payload, ack_msg_id);
 	}
+}
+
+esp_err_t module_mqtt_publish_critical_protection(const char *cause,
+                                                  uint64_t timestamp_ms,
+                                                  float voltage_vrms,
+                                                  float current_a_arms,
+                                                  float current_b_arms,
+                                                  uint32_t duration_cycles,
+                                                  const char *action_taken,
+                                                  const char *system_status)
+{
+	if (!module_mqtt_is_connected()) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	cJSON *root = cJSON_CreateObject();
+	if (root == NULL) {
+		return ESP_ERR_NO_MEM;
+	}
+
+	cJSON_AddStringToObject(root, "event_type", "CRITICAL_PROTECTION");
+	cJSON_AddStringToObject(root, "cause", cause != NULL ? cause : "UNKNOWN");
+	cJSON_AddNumberToObject(root, "timestamp", (double)timestamp_ms);
+
+	cJSON *data = cJSON_CreateObject();
+	if (data == NULL) {
+		cJSON_Delete(root);
+		return ESP_ERR_NO_MEM;
+	}
+
+	cJSON_AddItemToObject(root, "data", data);
+	cJSON_AddNumberToObject(data, "voltage_vrms", voltage_vrms);
+	cJSON_AddNumberToObject(data, "current_a_arms", current_a_arms);
+	cJSON_AddNumberToObject(data, "current_b_arms", current_b_arms);
+	cJSON_AddNumberToObject(data, "duration_cycles", duration_cycles);
+	cJSON_AddStringToObject(root, "action_taken", action_taken != NULL ? action_taken : "RELAY_OPEN");
+	cJSON_AddStringToObject(root, "system_status", system_status != NULL ? system_status : "LOCKED_AWAITING_ACK");
+
+	char *payload = cJSON_PrintUnformatted(root);
+	if (payload == NULL) {
+		cJSON_Delete(root);
+		return ESP_ERR_NO_MEM;
+	}
+
+	int msg_id = esp_mqtt_client_publish(mqtt_client, "smartplug/events", payload, 0, 1, 0);
+
+	cJSON_free(payload);
+	cJSON_Delete(root);
+
+	if (msg_id == -1) {
+		ESP_LOGE(TAG, "Failed to publish critical-protection event");
+		return ESP_FAIL;
+	}
+
+	ESP_LOGI(TAG, "Published critical-protection event (msg_id: %d)", msg_id);
+	return ESP_OK;
 }
 
 static void handle_safety_limits_command(const esp_mqtt_event_handle_t event)

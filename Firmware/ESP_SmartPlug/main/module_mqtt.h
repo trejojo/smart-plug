@@ -2,6 +2,7 @@
 
 #include "esp_err.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef esp_err_t (*module_mqtt_safety_limits_handler_t)(float max_vrms, float max_iarms, void *user_data);
 
@@ -86,6 +87,20 @@ esp_err_t module_mqtt_publish_temperature(float temp_celsius);
  * @return ESP_OK on success, error code otherwise
  */
 esp_err_t module_mqtt_publish_energy(float voltage_v, float current_a, float power_w, uint32_t energy_wh);
+
+/**
+ * @brief Publish a critical-protection event
+ *
+ * Publishes to topic: smartplug/events
+ */
+esp_err_t module_mqtt_publish_critical_protection(const char *cause,
+												  uint64_t timestamp_ms,
+										  float voltage_vrms,
+										  float current_a_arms,
+										  float current_b_arms,
+												  uint32_t duration_cycles,
+												  const char *action_taken,
+												  const char *system_status);
 
 /**
  * @brief Publish combined status (temperature + ADE telemetry)
