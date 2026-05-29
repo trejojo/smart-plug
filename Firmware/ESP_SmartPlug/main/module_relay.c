@@ -12,7 +12,7 @@ esp_err_t module_relay_init(void)
 
     ESP_RETURN_ON_ERROR(gpio_reset_pin(s_pins->relay_gpio), "module_relay", "relay pin reset failed");
     ESP_RETURN_ON_ERROR(gpio_set_direction(s_pins->relay_gpio, GPIO_MODE_OUTPUT), "module_relay", "relay pin mode failed");
-    ESP_RETURN_ON_ERROR(gpio_set_level(s_pins->relay_gpio, 0), "module_relay", "relay default level failed");
+    ESP_RETURN_ON_ERROR(gpio_set_level(s_pins->relay_gpio, 1), "module_relay", "relay default level failed");
 
     gpio_config_t relay_cfg = {
         .pin_bit_mask = 1ULL << s_pins->relay_gpio,
