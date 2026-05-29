@@ -1,4 +1,4 @@
-"""
+﻿"""
 SmartPlug MQTT Telemetry & Command Client
 Receives telemetry data and sends dynamic limits to the ESP32 SmartPlug.
 """
@@ -39,9 +39,9 @@ def on_connect(client, userdata, flags, rc):
         for topic in TOPICS:
             result = client.subscribe(topic)
             if result[0] == mqtt.MQTT_ERR_SUCCESS:
-                print(f"[{timestamp}] ✓ Subscribed to: {topic}")
+                print(f"[{timestamp}] Γ£ô Subscribed to: {topic}")
             else:
-                print(f"[{timestamp}] ✗ Failed to subscribe to {topic}: {result}")
+                print(f"[{timestamp}] Γ£ù Failed to subscribe to {topic}: {result}")
         print("\n" + "="*70)
         print(" COMMAND MODE READY")
         print(" Type 'set <vrms> <iarms>' to update safety limits.")
@@ -75,7 +75,7 @@ def on_message(client, userdata, msg):
         payload = f"[Binary data: {len(msg.payload)} bytes] Error: {e}"
     
     # Print a single, compact line for the received payload
-    print(f"\n[{timestamp}] 📥 RECEIVED on {topic}:\n       {payload}")
+    print(f"\n[{timestamp}] ≡ƒôÑ RECEIVED on {topic}:\n       {payload}")
     
     # Reprint the input prompt so the user knows they can still type
     print(" > ", end="", flush=True)
@@ -134,7 +134,7 @@ def main():
                             
                             # Publish to the ESP32
                             client.publish(COMMAND_TOPIC, payload_str, qos=1)
-                            print(f"\n 📤 PUBLISHED to {COMMAND_TOPIC}:\n       {payload_str}")
+                            print(f"\n ≡ƒôñ PUBLISHED to {COMMAND_TOPIC}:\n       {payload_str}")
                         except ValueError:
                             print(" Error: Limits must be valid numbers (e.g., 'set 135.0 6.5')")
                     else:
