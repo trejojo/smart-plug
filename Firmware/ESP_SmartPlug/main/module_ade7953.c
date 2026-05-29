@@ -940,10 +940,8 @@ esp_err_t module_ade7953_set_overvoltage_overcurrent_from_rms(float max_vrms, fl
     const float ki_const = ADE7953_DEFAULT_CALIBRATION.amps_per_irmsa_lsb;
 
     // Scale the target RMS values to raw values. 
-    // We apply the * 1.4142f peak factor here because OVLVL and OILVL registers
-    // are compared sample-by-sample against the raw wave peak (per section 0x224/0x225).
-    uint32_t ov_limit = (uint32_t)((max_vrms / kv_const) * 1.4142f);
-    uint32_t oia_limit = (uint32_t)((max_iarms / ki_const) * 1.4142f);
+    uint32_t ov_limit = (uint32_t)((max_vrms / kv_const) * 0.707106f);
+    uint32_t oia_limit = (uint32_t)((max_iarms / ki_const) * 0.707106f);
 
     // Explicit clamp to the ADE's 24-bit unsigned maximum value (8,388,607)
     // This safely keeps the register from wrapping around to 0 if a high threshold is set.
