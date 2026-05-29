@@ -2,9 +2,11 @@
 #include "esp_err.h"
 #include "esp_system.h"
 #include "esp_attr.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include <inttypes.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -186,9 +188,13 @@ static esp_err_t aice_apply_safety_limits_update(float max_vrms, float max_iarms
 }
 
 static bool ade7953_service_and_should_trip(const ade7953_measurement_t *measurement,
-                                            const ade7953_safety_limits_t *limits)
+                                            const ade7953_safety_limits_t *limits,
+                                            ade7953_safety_decision_t *out_decision)
 {
     if (measurement == NULL || limits == NULL) {
+        if (out_decision != NULL) {
+            memset(out_decision, 0, sizeof(*out_decision));
+        }
         return false;
     }
 
@@ -217,6 +223,9 @@ static bool ade7953_service_and_should_trip(const ade7953_measurement_t *measure
 
     ade7953_safety_decision_t decision;
     module_ade7953_evaluate_safety(measurement, limits, &decision);
+    if (out_decision != NULL) {
+        *out_decision = decision;
+    }
     if (decision.trip) {
         ESP_LOGE(TAG, "ADE7953 critical event: opening relay. hw=%d ov=%d uv=%d oc=%d op=%d",
                  decision.ade_hw_critical_event,
@@ -236,6 +245,65 @@ static bool ade7953_measurement_has_no_load(const ade7953_measurement_t *measure
     }
 
     return (measurement->raw.accmode & ADE7953_ACCMODE_ACTNLOAD_A) != 0;
+}
+
+static const char *critical_protection_cause_from_events(const ade7953_events_t *events,
+                                                         const ade7953_measurement_t *measurement,
+                                                         const ade7953_safety_decision_t *decision)
+{
+    if (decision != NULL && decision->ade_hw_critical_event) {
+        return "HW_CRITICAL";
+    }
+
+    if (events != NULL) {
+        if (events->overvoltage) {
+            return "OVERVOLTAGE";
+        }
+
+        if (events->overcurrent_a || events->overcurrent_b) {
+            if (measurement != NULL && measurement->voltage_vrms < g_ade_policy.safety_limits.min_voltage_vrms) {
+                return "OVERCURRENT_SAG";
+            }
+
+            return "OVERCURRENT";
+        }
+    }
+
+    if (decision != NULL) {
+        if (decision->overvoltage_event) {
+            return "OVERVOLTAGE";
+        }
+
+        if (decision->overcurrent_event) {
+            if (measurement != NULL && measurement->voltage_vrms < g_ade_policy.safety_limits.min_voltage_vrms) {
+                return "OVERCURRENT_SAG";
+            }
+
+            return "OVERCURRENT";
+        }
+    }
+
+    return "UNKNOWN";
+}
+
+static uint32_t critical_protection_duration_cycles(const ade7953_measurement_t *measurement,
+                                                    uint64_t start_ms)
+{
+    if (measurement == NULL || measurement->line_frequency_hz <= 0.0f) {
+        return 1U;
+    }
+
+    uint64_t elapsed_ms = 0;
+    if (measurement->timestamp_ms > start_ms) {
+        elapsed_ms = measurement->timestamp_ms - start_ms;
+    }
+
+    float cycles = ((float)elapsed_ms * measurement->line_frequency_hz) / 1000.0f;
+    if (cycles < 1.0f) {
+        cycles = 1.0f;
+    }
+
+    return (uint32_t)(cycles + 0.5f);
 }
 
 static void IRAM_ATTR ade7953_safety_irq_handler(void *arg)
@@ -419,18 +487,52 @@ void app_main(void)
 
     setup_button_init(pins->setup_bt_button);
 
-    module_relay_set(false);
-    g_relay_on = false;
+    module_relay_set(true);
+    g_relay_on = true;
 
     const char *test_path = MODULE_SDCARD_MOUNT_POINT "/test.txt";
     uint32_t button_press_ticks = 0;
     uint32_t sensor_timer_ticks = 0;
     bool button_was_pressed = false;
+    bool critical_protection_active = false;
+    bool critical_protection_report_pending = false;
+    bool critical_protection_irq_events_valid = false;
+    uint64_t critical_protection_started_ms = 0;
+    ade7953_measurement_t critical_protection_measurement = {0};
+    ade7953_safety_decision_t critical_protection_decision = {0};
+    ade7953_events_t critical_protection_irq_events = {0};
     
     while (true) {
         bool ade_irq_pending = false;
         while (ulTaskNotifyTake(pdTRUE, 0) > 0) {
             ade_irq_pending = true;
+        }
+        if (ade_irq_pending == true) {
+            g_relay_on = false;            // Sync the MQTT payload state
+            aice_set_status(STATUS_ERROR); // Turn the LED Red
+
+            ESP_LOGE(TAG, "Hardware Safety Trip! Relay physically opened by ISR.");
+            
+            // Read events to log the exact cause
+            ade7953_events_t events = {0};
+            if (module_ade7953_read_events(&events, true) == ESP_OK) {
+                if (events.overcurrent_a || events.overcurrent_b) {
+                    ESP_LOGE(TAG, "Cause: OVERCURRENT");
+                }
+                if (events.overvoltage) {
+                    ESP_LOGE(TAG, "Cause: OVERVOLTAGE");
+                }
+                critical_protection_irq_events = events;
+                critical_protection_irq_events_valid = true;
+            } else {
+                critical_protection_irq_events_valid = false;
+            }
+
+            critical_protection_active = true;
+            critical_protection_report_pending = true;
+            if (critical_protection_started_ms == 0) {
+                critical_protection_started_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+            }
         }
 
         int button_level = gpio_get_level(pins->setup_bt_button);
@@ -460,9 +562,36 @@ void app_main(void)
             if (button_was_pressed) {
                 // If it was a short press (less than 4 seconds)
                 if (button_press_ticks > 0 && button_press_ticks < 40) {
-                    g_relay_on = !g_relay_on; // Toggle relay state
-                    module_relay_set(g_relay_on);
-                    ESP_LOGI(TAG, "Button short press: Relay toggled %s", g_relay_on ? "ON" : "OFF");
+                    if (critical_protection_active) {
+                        ade7953_measurement_t recovery_measurement = {0};
+                        ade7953_safety_decision_t recovery_decision = {0};
+                        esp_err_t recovery_ret = module_ade7953_read_measurement(&recovery_measurement, true, true);
+                        if (recovery_ret == ESP_OK) {
+                            module_ade7953_evaluate_safety(&recovery_measurement, &g_ade_policy.safety_limits, &recovery_decision);
+                            if (!recovery_decision.trip) {
+                                critical_protection_active = false;
+                                critical_protection_started_ms = 0;
+                                g_relay_on = true;
+                                module_relay_set(true);
+                                ESP_LOGI(TAG, "Button short press: critical protection cleared, relay closed");
+                                aice_refresh_network_state(credentials_in_nvs);
+                            } else {
+                                module_relay_set(false);
+                                g_relay_on = false;
+                                aice_set_status(STATUS_ERROR);
+                                ESP_LOGW(TAG, "Button short press ignored: protection condition still present");
+                            }
+                        } else {
+                            module_relay_set(false);
+                            g_relay_on = false;
+                            aice_set_status(STATUS_ERROR);
+                            ESP_LOGW(TAG, "Button short press could not verify recovery: %s", esp_err_to_name(recovery_ret));
+                        }
+                    } else {
+                        g_relay_on = !g_relay_on; // Toggle relay state
+                        module_relay_set(g_relay_on);
+                        ESP_LOGI(TAG, "Button short press: Relay toggled %s", g_relay_on ? "ON" : "OFF");
+                    }
                 }
                 button_was_pressed = false;
                 button_press_ticks = 0;
@@ -473,7 +602,7 @@ void app_main(void)
         // SLOW LOGIC: SENSORS & NETWORK (Every 1000ms)
         // -------------------------------------------------------------
         sensor_timer_ticks++;
-        if (sensor_timer_ticks >= 10) {
+        if (sensor_timer_ticks >= 20) {
             sensor_timer_ticks = 0; // Reset 1-second timer
 
             bool ade_trip = false;
@@ -534,8 +663,17 @@ void app_main(void)
                                  safety_events.overcurrent_a,
                                  safety_events.overcurrent_b,
                                  safety_events.accmode);
+
+                        critical_protection_irq_events = safety_events;
+                        critical_protection_irq_events_valid = true;
                     } else {
                         ESP_LOGW(TAG, "ADE safety IRQ occurred, but SPI diagnostics failed");
+                        critical_protection_irq_events_valid = false;
+                    }
+                    critical_protection_active = true;
+                    critical_protection_report_pending = true;
+                    if (critical_protection_started_ms == 0) {
+                        critical_protection_started_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
                     }
                     ade_trip = true;
                 }
@@ -552,7 +690,22 @@ void app_main(void)
                 esp_err_t ade_ret = module_ade7953_read_measurement(&measurement, true, true);
                 if (ade_ret == ESP_OK) {
                     ade_measurement_ok = true;
-                    ade_trip = ade7953_service_and_should_trip(&measurement, &g_ade_policy.safety_limits);
+                    ade_trip = ade7953_service_and_should_trip(&measurement, &g_ade_policy.safety_limits, &critical_protection_decision);
+                    if (ade_trip && !critical_protection_active) {
+                        critical_protection_active = true;
+                        critical_protection_report_pending = true;
+                        critical_protection_started_ms = measurement.timestamp_ms;
+                        critical_protection_measurement = (ade7953_measurement_t){0};
+                        critical_protection_irq_events_valid = false;
+                        memset(&critical_protection_irq_events, 0, sizeof(critical_protection_irq_events));
+                    }
+
+                    if (critical_protection_report_pending && critical_protection_measurement.timestamp_ms == 0) {
+                        critical_protection_measurement = measurement;
+                        if (!critical_protection_irq_events_valid) {
+                            memset(&critical_protection_irq_events, 0, sizeof(critical_protection_irq_events));
+                        }
+                    }
                 } else {
                     ESP_LOGW(TAG, "ADE7953 read failed: %s", esp_err_to_name(ade_ret));
                     sensor_error = true;
@@ -562,14 +715,37 @@ void app_main(void)
             }
 
             // State Machine & LED Handling
-            if (ade_trip || sensor_error) {
+            if (ade_trip || sensor_error || critical_protection_active) {
                 module_relay_set(false);
                 g_relay_on = false;
                 aice_set_status(STATUS_ERROR);
             } 
 
+            if (critical_protection_report_pending && ade_measurement_ok && module_mqtt_is_connected()) {
+                const char *cause = critical_protection_cause_from_events(
+                    critical_protection_irq_events_valid ? &critical_protection_irq_events : NULL,
+                    &critical_protection_measurement,
+                    &critical_protection_decision);
+                uint32_t duration_cycles = critical_protection_duration_cycles(&critical_protection_measurement,
+                                                                               critical_protection_started_ms);
+                esp_err_t mqtt_ret = module_mqtt_publish_critical_protection(
+                    cause,
+                    critical_protection_measurement.timestamp_ms,
+                    critical_protection_measurement.voltage_vrms,
+                    critical_protection_measurement.current_a_arms,
+                    critical_protection_measurement.current_b_arms,
+                    duration_cycles,
+                    "RELAY_OPEN",
+                    "LOCKED_AWAITING_ACK");
+                if (mqtt_ret == ESP_OK) {
+                    critical_protection_report_pending = false;
+                } else {
+                    ESP_LOGW(TAG, "MQTT critical-protection publish failed: %s", esp_err_to_name(mqtt_ret));
+                }
+            }
+
             // MQTT Publish
-            if (module_mqtt_is_connected() && ade_measurement_ok && !ade_trip && !sensor_error) {
+            if (module_mqtt_is_connected() && ade_measurement_ok && !ade_trip && !sensor_error && !critical_protection_active) {
                 esp_err_t mqtt_ret = module_mqtt_publish_status(
                     temperature_c,
                     measurement.voltage_vrms,
