@@ -407,6 +407,7 @@ esp_err_t module_ade7953_read24(uint16_t reg, uint32_t *value);
 esp_err_t module_ade7953_read32(uint16_t reg, uint32_t *value);
 esp_err_t module_ade7953_read_s24(uint16_t reg, int32_t *value);
 esp_err_t module_ade7953_read_s32(uint16_t reg, int32_t *value);
+esp_err_t module_ade7953_read_waveform_samples(int32_t *v_waveform, int32_t *ia_waveform);
 esp_err_t module_ade7953_write8(uint16_t reg, uint8_t value);
 esp_err_t module_ade7953_write16(uint16_t reg, uint16_t value);
 esp_err_t module_ade7953_write24(uint16_t reg, uint32_t value);

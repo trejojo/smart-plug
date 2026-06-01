@@ -530,6 +530,29 @@ esp_err_t module_mqtt_publish_status(float temperature_c,
 }
 
 /**
+ * @brief Publish waveform chunk payload
+ */
+esp_err_t module_mqtt_publish_waveform_chunk(const char *payload)
+{
+	if (!module_mqtt_is_connected()) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	if (payload == NULL || payload[0] == '\0') {
+		return ESP_ERR_INVALID_ARG;
+	}
+
+	int msg_id = esp_mqtt_client_publish(mqtt_client, "smartplug/waveform/chunk", payload, 0, 1, 0);
+	if (msg_id == -1) {
+		ESP_LOGE(TAG, "Failed to publish waveform chunk");
+		return ESP_FAIL;
+	}
+
+	ESP_LOGI(TAG, "Published waveform chunk (msg_id: %d)", msg_id);
+	return ESP_OK;
+}
+
+/**
  * @brief Disconnect from MQTT broker
  */
 esp_err_t module_mqtt_disconnect(void)

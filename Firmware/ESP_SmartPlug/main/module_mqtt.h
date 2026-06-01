@@ -131,6 +131,13 @@ esp_err_t module_mqtt_publish_status(float temperature_c,
 									 bool relay_state);
 
 /**
+ * @brief Publish a waveform chunk payload
+ *
+ * Publishes to topic: smartplug/waveform/chunk
+ */
+esp_err_t module_mqtt_publish_waveform_chunk(const char *payload);
+
+/**
  * @brief Disconnect from MQTT broker
  *
  * @return ESP_OK on success, error code otherwise

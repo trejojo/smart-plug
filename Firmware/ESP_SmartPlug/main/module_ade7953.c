@@ -388,6 +388,17 @@ esp_err_t module_ade7953_read_s32(uint16_t reg, int32_t *value)
     return ESP_OK;
 }
 
+esp_err_t module_ade7953_read_waveform_samples(int32_t *v_waveform, int32_t *ia_waveform)
+{
+    if (v_waveform == NULL || ia_waveform == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_RETURN_ON_ERROR(module_ade7953_read_s32(ADE7953_REG_V_32, v_waveform), TAG, "V waveform read failed");
+    ESP_RETURN_ON_ERROR(module_ade7953_read_s32(ADE7953_REG_IA_32, ia_waveform), TAG, "IA waveform read failed");
+    return ESP_OK;
+}
+
 esp_err_t module_ade7953_write8(uint16_t reg, uint8_t value)
 {
     return spi_write_bytes(reg, &value, 1);

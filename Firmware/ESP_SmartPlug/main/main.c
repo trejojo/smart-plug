@@ -5,6 +5,7 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 #include <inttypes.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -40,18 +41,35 @@ static gpio_num_t s_ade_irq_gpio = GPIO_NUM_NC;
 #define ENABLE_WAVEFORM_STREAM 0
 #endif
 
+#if ENABLE_WAVEFORM_STREAM
+#define WAVEFORM_CHUNK_SIZE 200
+#define WAVEFORM_JSON_SCRATCHPAD_SIZE 4096
+
+static int32_t s_raw_v_buf0[WAVEFORM_CHUNK_SIZE];
+static int32_t s_raw_i_buf0[WAVEFORM_CHUNK_SIZE];
+static int32_t s_raw_v_buf1[WAVEFORM_CHUNK_SIZE];
+static int32_t s_raw_i_buf1[WAVEFORM_CHUNK_SIZE];
+
+static volatile uint8_t s_active_buffer = 0;
+static volatile uint16_t s_chunk_index = 0;
+static volatile uint8_t s_ready_buffer = 0;
+static volatile uint16_t s_ready_count = 0;
+static volatile bool s_chunk_ready = false;
+static TaskHandle_t s_waveform_capture_task_handle = NULL;
+static TaskHandle_t s_waveform_pub_task_handle = NULL;
+static portMUX_TYPE s_waveform_mux = portMUX_INITIALIZER_UNLOCKED;
+#endif
+
 #ifndef ENABLE_IRQ_DEBUG_READBACK
 #define ENABLE_IRQ_DEBUG_READBACK 0
 #endif
 
 #if ENABLE_WAVEFORM_STREAM
-static TaskHandle_t s_wave_task = NULL;
-
 static void IRAM_ATTR ade7953_waveform_irq_handler(void *arg)
 {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    if (s_wave_task != NULL) {
-        vTaskNotifyGiveFromISR(s_wave_task, &xHigherPriorityTaskWoken);
+    if (s_waveform_capture_task_handle != NULL) {
+        vTaskNotifyGiveFromISR(s_waveform_capture_task_handle, &xHigherPriorityTaskWoken);
     }
     if (xHigherPriorityTaskWoken == pdTRUE) {
         portYIELD_FROM_ISR();
@@ -60,26 +78,94 @@ static void IRAM_ATTR ade7953_waveform_irq_handler(void *arg)
 
 static void waveform_stream_task(void *pvParameters)
 {
+    s_waveform_pub_task_handle = xTaskGetCurrentTaskHandle();
+
+    char *json_scratchpad = malloc(WAVEFORM_JSON_SCRATCHPAD_SIZE);
+    if (json_scratchpad == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate waveform JSON scratchpad");
+        vTaskDelete(NULL);
+        return;
+    }
+
     while (true) {
-        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000)) == 0) {
-#if ENABLE_IRQ_DEBUG_READBACK
-            ade7953_events_t events = {0};
-            if (module_ade7953_read_events(&events, false) == ESP_OK) {
-                ESP_LOGW(TAG, "ADE IRQ debug: irq_a=0x%06" PRIX32 " irq_b=0x%06" PRIX32 " wsmp=%d cycend=%d",
-                         events.irq_a,
-                         events.irq_b,
-                         events.waveform_sample_ready,
-                         events.line_cycle_end);
-            }
-#endif
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+
+        int32_t *v_ptr = NULL;
+        int32_t *i_ptr = NULL;
+        uint16_t sample_count = 0;
+
+        portENTER_CRITICAL(&s_waveform_mux);
+        if (s_chunk_ready) {
+            const uint8_t ready_buffer = s_ready_buffer;
+            sample_count = s_ready_count;
+            v_ptr = (ready_buffer == 0) ? s_raw_v_buf0 : s_raw_v_buf1;
+            i_ptr = (ready_buffer == 0) ? s_raw_i_buf0 : s_raw_i_buf1;
+            s_chunk_ready = false;
+        }
+        portEXIT_CRITICAL(&s_waveform_mux);
+
+        if (v_ptr == NULL || i_ptr == NULL || sample_count == 0) {
             continue;
         }
 
-        ade7953_raw_measurement_t raw = {0};
-        if (module_ade7953_read_raw_measurement(&raw, false, true) == ESP_OK) {
-            printf("WAVE,%" PRId32 ",%" PRId32 "\n", raw.v_waveform, raw.ia_waveform);
+        ade7953_calibration_t cal = {0};
+        module_ade7953_get_calibration(&cal);
+        const float v_scale = cal.volts_per_vrms_lsb > 0.0f ? cal.volts_per_vrms_lsb : 0.00001903f;
+        const float i_scale = cal.amps_per_irmsa_lsb > 0.0f ? cal.amps_per_irmsa_lsb : 0.00000076f;
+
+        int offset = snprintf(json_scratchpad, WAVEFORM_JSON_SCRATCHPAD_SIZE,
+                              "{\"event_type\":\"WAVEFORM_CHUNK\",\"count\":%" PRIu16 ",\"v\":[",
+                              sample_count);
+        if (offset < 0 || offset >= WAVEFORM_JSON_SCRATCHPAD_SIZE) {
+            ESP_LOGW(TAG, "Waveform JSON formatting failed at header");
+            continue;
+        }
+
+        for (uint16_t i = 0; i < sample_count && offset < WAVEFORM_JSON_SCRATCHPAD_SIZE; ++i) {
+            offset += snprintf(json_scratchpad + offset,
+                               WAVEFORM_JSON_SCRATCHPAD_SIZE - offset,
+                               "%.2f%s",
+                               (float)v_ptr[i] * v_scale,
+                               (i + 1U == sample_count) ? "" : ",");
+        }
+
+        if (offset < 0 || offset >= WAVEFORM_JSON_SCRATCHPAD_SIZE) {
+            ESP_LOGW(TAG, "Waveform JSON formatting failed while writing voltage samples");
+            continue;
+        }
+
+        offset += snprintf(json_scratchpad + offset,
+                           WAVEFORM_JSON_SCRATCHPAD_SIZE - offset,
+                           "],\"i\":[");
+        if (offset < 0 || offset >= WAVEFORM_JSON_SCRATCHPAD_SIZE) {
+            ESP_LOGW(TAG, "Waveform JSON formatting failed before current samples");
+            continue;
+        }
+
+        for (uint16_t i = 0; i < sample_count && offset < WAVEFORM_JSON_SCRATCHPAD_SIZE; ++i) {
+            offset += snprintf(json_scratchpad + offset,
+                               WAVEFORM_JSON_SCRATCHPAD_SIZE - offset,
+                               "%.3f%s",
+                               (float)i_ptr[i] * i_scale,
+                               (i + 1U == sample_count) ? "" : ",");
+        }
+
+        if (offset < 0 || offset >= WAVEFORM_JSON_SCRATCHPAD_SIZE) {
+            ESP_LOGW(TAG, "Waveform JSON formatting failed while writing current samples");
+            continue;
+        }
+
+        snprintf(json_scratchpad + offset,
+                 WAVEFORM_JSON_SCRATCHPAD_SIZE - offset,
+                 "]}");
+
+        esp_err_t publish_ret = module_mqtt_publish_waveform_chunk(json_scratchpad);
+        if (publish_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Waveform chunk publish failed: %s", esp_err_to_name(publish_ret));
         }
     }
+
+    free(json_scratchpad);
 }
 #endif
 
@@ -316,10 +402,64 @@ static void IRAM_ATTR ade7953_safety_irq_handler(void *arg)
     if (s_main_task_handle != NULL) {
         vTaskNotifyGiveFromISR(s_main_task_handle, &xHigherPriorityTaskWoken);
     }
+#if ENABLE_WAVEFORM_STREAM
+    if (s_waveform_capture_task_handle != NULL) {
+        vTaskNotifyGiveFromISR(s_waveform_capture_task_handle, &xHigherPriorityTaskWoken);
+    }
+#endif
     if (xHigherPriorityTaskWoken == pdTRUE) {
         portYIELD_FROM_ISR();
     }
 }
+
+#if ENABLE_WAVEFORM_STREAM
+static void waveform_capture_task(void *pvParameters)
+{
+    (void)pvParameters;
+
+    s_waveform_capture_task_handle = xTaskGetCurrentTaskHandle();
+
+    while (true) {
+        if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) == 0) {
+            continue;
+        }
+
+        ade7953_events_t events = {0};
+        if (module_ade7953_read_events(&events, false) != ESP_OK || !events.waveform_sample_ready) {
+            continue;
+        }
+
+        int32_t v_sample = 0;
+        int32_t i_sample = 0;
+        if (module_ade7953_read_waveform_samples(&v_sample, &i_sample) != ESP_OK) {
+            continue;
+        }
+
+        bool notify_publish_task = false;
+
+        portENTER_CRITICAL(&s_waveform_mux);
+        int32_t *v_buf = (s_active_buffer == 0) ? s_raw_v_buf0 : s_raw_v_buf1;
+        int32_t *i_buf = (s_active_buffer == 0) ? s_raw_i_buf0 : s_raw_i_buf1;
+        v_buf[s_chunk_index] = v_sample;
+        i_buf[s_chunk_index] = i_sample;
+        s_chunk_index++;
+
+        if (s_chunk_index >= WAVEFORM_CHUNK_SIZE) {
+            s_ready_buffer = s_active_buffer;
+            s_ready_count = s_chunk_index;
+            s_chunk_ready = true;
+            s_active_buffer = (s_active_buffer == 0) ? 1 : 0;
+            s_chunk_index = 0;
+            notify_publish_task = true;
+        }
+        portEXIT_CRITICAL(&s_waveform_mux);
+
+        if (notify_publish_task && s_waveform_pub_task_handle != NULL) {
+            xTaskNotifyGive(s_waveform_pub_task_handle);
+        }
+    }
+}
+#endif
 
 static void ade_irq_isr_setup(const smartplug_board_pins_t *pins, const ade_irq_policy_t *policy)
 {
@@ -481,6 +621,11 @@ void app_main(void)
         }
         ESP_ERROR_CHECK(module_ade7953_apply_smartplug_startup(&g_ade_policy));
         ade_irq_isr_setup(pins, &g_ade_irq_policy);
+
+#if ENABLE_WAVEFORM_STREAM
+        xTaskCreate(waveform_stream_task, "waveform_stream_task", 4096, NULL, 5, NULL);
+        xTaskCreate(waveform_capture_task, "waveform_capture_task", 4096, NULL, 6, NULL);
+#endif
     } else {
         ESP_LOGE(TAG, "ADE7953 init failed, continuing without metering: %s", esp_err_to_name(ade_init_ret));
     }
