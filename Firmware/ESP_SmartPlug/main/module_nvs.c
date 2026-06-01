@@ -213,3 +213,32 @@ esp_err_t module_nvs_get_password(char *password)
 	
 	return ret;
 }
+
+esp_err_t module_nvs_get_pzem_enabled(bool *enabled)
+{
+	if (enabled == NULL) {
+		return ESP_ERR_INVALID_ARG;
+	}
+
+	nvs_handle_t handle;
+	esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+	if (ret != ESP_OK) {
+		// Namespace may not exist yet; default to enabled
+		*enabled = true;
+		return ESP_OK;
+	}
+
+	uint8_t val = 1;
+	ret = nvs_get_u8(handle, NVS_KEY_PZEM_ENABLED, &val);
+	nvs_close(handle);
+
+	if (ret == ESP_ERR_NVS_NOT_FOUND) {
+		*enabled = true; // default
+		return ESP_OK;
+	} else if (ret != ESP_OK) {
+		return ret;
+	}
+
+	*enabled = (val != 0);
+	return ESP_OK;
+}

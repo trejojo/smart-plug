@@ -5,42 +5,28 @@
 __attribute__((unused)) static const smartplug_board_pins_t s_devkit_pins = {
     .relay_gpio = GPIO_NUM_2,
     .rgb_led_gpio = GPIO_NUM_38,
+
     .tmp102_i2c_port = I2C_NUM_0,
     .tmp102_sda_gpio = GPIO_NUM_17,
     .tmp102_scl_gpio = GPIO_NUM_18,
     .tmp102_i2c_addr = 0x48,
+
     .sd_spi_host = SPI3_HOST,
     .sd_cs_gpio = GPIO_NUM_4,
     .sd_mosi_gpio = GPIO_NUM_5,
     .sd_sclk_gpio = GPIO_NUM_6,
     .sd_miso_gpio = GPIO_NUM_7,
+
     .pzem_uart_port = UART_NUM_1,
     .pzem_tx_gpio = GPIO_NUM_16,
     .pzem_rx_gpio = GPIO_NUM_15,
     .pzem_dir_gpio = GPIO_NUM_NC,
     .pzem_uart_baud_rate = 9600,
     .pzem_default_slave_addr = 0x01,
-};
 
-static const smartplug_board_pins_t s_custom_pcb_pins = {
-    .relay_gpio = GPIO_NUM_15,
-    .rgb_led_gpio = GPIO_NUM_16,
-    .tmp102_i2c_port = I2C_NUM_0,
-    .tmp102_sda_gpio = GPIO_NUM_17,
-    .tmp102_scl_gpio = GPIO_NUM_18,
-    .tmp102_i2c_addr = 0x48,
-    .sd_spi_host = SPI3_HOST,
-    .sd_cs_gpio = GPIO_NUM_4,
-    .sd_mosi_gpio = GPIO_NUM_5,
-    .sd_sclk_gpio = GPIO_NUM_6,
-    .sd_miso_gpio = GPIO_NUM_7,
-    .pzem_uart_port = UART_NUM_1,
-    .pzem_tx_gpio = GPIO_NUM_11,
-    .pzem_rx_gpio = GPIO_NUM_13,
-    .pzem_dir_gpio = GPIO_NUM_NC,
-    .pzem_uart_baud_rate = 9600,
-    .pzem_default_slave_addr = 0x01,
-    /*
+    .setup_bt_button = GPIO_NUM_0,
+
+    /* Same pinout as the custom PCB for firmware bring-up, edit if your dev wiring differs. */
     .ade_spi_host = SPI2_HOST,
     .ade_cs_gpio = GPIO_NUM_10,
     .ade_mosi_gpio = GPIO_NUM_11,
@@ -48,7 +34,40 @@ static const smartplug_board_pins_t s_custom_pcb_pins = {
     .ade_miso_gpio = GPIO_NUM_13,
     .ade_reset_gpio = GPIO_NUM_14,
     .ade_irq_gpio = GPIO_NUM_21,
-    */
+};
+
+static const smartplug_board_pins_t s_custom_pcb_pins = {
+    .relay_gpio = GPIO_NUM_15,
+    .rgb_led_gpio = GPIO_NUM_16,
+
+    .tmp102_i2c_port = I2C_NUM_0,
+    .tmp102_sda_gpio = GPIO_NUM_17,
+    .tmp102_scl_gpio = GPIO_NUM_18,
+    .tmp102_i2c_addr = 0x48,
+
+    .sd_spi_host = SPI3_HOST,
+    .sd_cs_gpio = GPIO_NUM_4,
+    .sd_mosi_gpio = GPIO_NUM_5,
+    .sd_sclk_gpio = GPIO_NUM_6,
+    .sd_miso_gpio = GPIO_NUM_7,
+
+    .pzem_uart_port = UART_NUM_1,
+    .pzem_tx_gpio = GPIO_NUM_NC,
+    .pzem_rx_gpio = GPIO_NUM_NC,
+    .pzem_dir_gpio = GPIO_NUM_NC,
+    .pzem_uart_baud_rate = 9600,
+    .pzem_default_slave_addr = 0x01,
+
+    .setup_bt_button = GPIO_NUM_8,
+
+    /* ADE7953 isolated SPI + control pins. */
+    .ade_spi_host = SPI2_HOST,
+    .ade_cs_gpio = GPIO_NUM_10,
+    .ade_mosi_gpio = GPIO_NUM_11,
+    .ade_sclk_gpio = GPIO_NUM_12,
+    .ade_miso_gpio = GPIO_NUM_13,
+    .ade_reset_gpio = GPIO_NUM_14,
+    .ade_irq_gpio = GPIO_NUM_21,
 };
 
 const smartplug_board_pins_t *smartplug_board_pins_get(void)

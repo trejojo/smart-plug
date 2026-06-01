@@ -66,6 +66,7 @@ dist/
 venv/
 .venv/
 env/
+.venv_pc/
 
 # Language Servers
 .clangd/
