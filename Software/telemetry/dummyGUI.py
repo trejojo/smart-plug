@@ -15,7 +15,7 @@ Design goals:
         TX: smartplug/waveform/cmd
         RX: smartplug/waveform
     - Show waveform, harmonic spectrum and THD using dummy samples generated at
-      2400 samples/s.
+      512 samples at 6.99 kHz from the ADE waveform reconstruction path.
 
 Important FFT normalization note:
     For a coherent sine sampled over an integer number of cycles, the DFT bin
@@ -24,10 +24,9 @@ Important FFT normalization note:
     computed from peak amplitudes, which is equivalent to using RMS amplitudes
     because the sqrt(2) factor cancels in the ratio.
 
-    With Fs=2400 Hz and 60 Hz fundamental, the 20th harmonic is exactly at the
-    Nyquist limit. It is shown in the UI because it is part of the project goal,
-    but in real hardware it is better to sample above 2400 Hz if the 20th
-    harmonic must be measured robustly.
+    The GUI plots the first 20 harmonics in the compact spectrum view. The
+    FFT table includes all integer 60 Hz harmonics available below Nyquist for
+    Fs=6990 Hz.
 """
 
 from __future__ import annotations
@@ -50,13 +49,16 @@ from tkinter import ttk, messagebox
 # Constants and theme
 # =============================================================================
 
-APP_TITLE = "AYCE Smart Plug Dashboard - Dummy Mode v8"
+APP_TITLE = "AYCE Smart Plug Dashboard - Dummy Mode v10"
 
 NOMINAL_VRMS = 127.0
 NOMINAL_FREQ_HZ = 60.0
 NOMINAL_CURRENT_ARMS = 5.0
-SAMPLE_RATE_HZ = 2400
-MAX_HARMONIC_ORDER = 20
+SAMPLE_RATE_HZ = 6990
+WAVEFORM_SAMPLE_COUNT = 512
+WAVEFORM_CAPTURE_SECONDS = WAVEFORM_SAMPLE_COUNT / SAMPLE_RATE_HZ
+MAX_PLOT_HARMONIC_ORDER = 20
+MAX_TABLE_HARMONIC_ORDER = int((SAMPLE_RATE_HZ / 2.0) // NOMINAL_FREQ_HZ)
 
 TOPIC_STATUS = "smartplug/status"
 TOPIC_EVENTS = "smartplug/events"
@@ -115,7 +117,10 @@ class TelemetrySample:
 
     @property
     def apparent_power_va(self) -> float:
-        return max(0.0, self.vrms * self.irms)
+        # Current team decision: display apparent power from the P-Q triangle.
+        # S = sqrt(P^2 + Q^2), using active and reactive power delivered by the
+        # metering path instead of Vrms*Irms.
+        return math.sqrt(max(0.0, self.active_power * self.active_power + self.reactive_power * self.reactive_power))
 
     @property
     def current_percent_nominal(self) -> float:
@@ -143,7 +148,7 @@ class SafetyLimitAck:
 @dataclass
 class WaveformPacket:
     timestamp: str
-    duration_s: int
+    duration_s: float
     sampling_rate_hz: int
     voltage_samples: List[float]
     current_samples: List[float]
@@ -186,7 +191,7 @@ def dft_peak_amplitudes(
     samples: List[float],
     sampling_rate_hz: int,
     fundamental_hz: float,
-    max_order: int = MAX_HARMONIC_ORDER,
+    max_order: int = MAX_TABLE_HARMONIC_ORDER,
 ) -> List[float]:
     """
     Estimate peak amplitudes at integer harmonic orders using a direct DFT at
@@ -218,9 +223,14 @@ def dft_peak_amplitudes(
             angle = omega * idx
             cos_sum += x * math.cos(angle)
             sin_sum += x * math.sin(angle)
-        # Normalized peak amplitude. At the exact Nyquist bin this is not ideal,
-        # but the 20th harmonic at Fs=2400 Hz is included for visualization.
-        amps.append((2.0 / n) * math.sqrt(cos_sum * cos_sum + sin_sum * sin_sum))
+        magnitude = math.sqrt(cos_sum * cos_sum + sin_sum * sin_sum)
+        # Single-sided peak amplitude normalization. Do not double DC or an
+        # exact Nyquist component. For this project harmonics start at 60 Hz,
+        # but the Nyquist guard keeps the calculation valid if Fs changes later.
+        if abs(freq - sampling_rate_hz / 2.0) < 1e-9:
+            amps.append((1.0 / n) * magnitude)
+        else:
+            amps.append((2.0 / n) * magnitude)
     return amps
 
 
@@ -243,7 +253,7 @@ def compute_waveform_analysis(
     thd_i = compute_thd_from_peak_amplitudes(i_amps)
 
     harmonics: List[Dict[str, float]] = []
-    for order in range(1, MAX_HARMONIC_ORDER + 1):
+    for order in range(1, MAX_TABLE_HARMONIC_ORDER + 1):
         harmonics.append({
             "order": float(order),
             "frequency_hz": float(order * fundamental_hz),
@@ -429,22 +439,23 @@ class DummySmartPlugDataSource:
             "timestamp": now_str(),
         })
 
-    def request_waveform_capture(self, duration_s: int) -> None:
-        duration_s = int(clamp(duration_s, 1, 5))
+    def request_waveform_capture(self) -> None:
         if self.telemetry_paused:
             return
         self.telemetry_paused = True
-        worker = threading.Thread(target=self._waveform_capture_worker, args=(duration_s,), daemon=True)
+        worker = threading.Thread(target=self._waveform_capture_worker, daemon=True)
         worker.start()
 
-    def _waveform_capture_worker(self, duration_s: int) -> None:
-        time.sleep(duration_s)
-        packet = self._generate_waveform_packet(duration_s)
+    def _waveform_capture_worker(self) -> None:
+        # The real ESP32/ADE path is expected to pause base telemetry while
+        # collecting 512 instantaneous samples at approximately 6.99 kHz.
+        time.sleep(WAVEFORM_CAPTURE_SECONDS)
+        packet = self._generate_waveform_packet()
         self._emit(TOPIC_WAVEFORM_DATA, packet)
         self.telemetry_paused = False
 
-    def _generate_waveform_packet(self, duration_s: int) -> Dict[str, Any]:
-        n = SAMPLE_RATE_HZ * duration_s
+    def _generate_waveform_packet(self) -> Dict[str, Any]:
+        n = WAVEFORM_SAMPLE_COUNT
         freq = NOMINAL_FREQ_HZ
         dt = 1.0 / SAMPLE_RATE_HZ
 
@@ -459,8 +470,15 @@ class DummySmartPlugDataSource:
         # Dummy harmonic content. Values are fractions of the fundamental peak.
         # We include several odd harmonics; the analysis routine can estimate up
         # to the 20th order.
-        v_harmonics = {1: 1.0, 3: 0.025, 5: 0.018, 7: 0.012, 9: 0.006, 11: 0.004}
-        i_harmonics = {1: 1.0, 3: 0.065, 5: 0.040, 7: 0.025, 9: 0.012, 11: 0.008, 13: 0.006}
+        v_harmonics = {
+            1: 1.0, 3: 0.025, 5: 0.018, 7: 0.012, 9: 0.006, 11: 0.004,
+            17: 0.0025, 23: 0.0018, 29: 0.0012, 35: 0.0009, 41: 0.0007
+        }
+        i_harmonics = {
+            1: 1.0, 3: 0.065, 5: 0.040, 7: 0.025, 9: 0.012, 11: 0.008,
+            13: 0.006, 17: 0.0045, 19: 0.0035, 23: 0.0026, 29: 0.0020,
+            37: 0.0013, 43: 0.0010, 53: 0.0007
+        }
 
         voltage_samples: List[float] = []
         current_samples: List[float] = []
@@ -483,7 +501,8 @@ class DummySmartPlugDataSource:
         return {
             "event_type": "WAVEFORM_CAPTURE",
             "timestamp": now_str(),
-            "duration_s": duration_s,
+            "sample_count": n,
+            "duration_s": round(n / SAMPLE_RATE_HZ, 6),
             "sampling_rate_hz": SAMPLE_RATE_HZ,
             "signals": {
                 "voltage_v": voltage_samples,
@@ -494,7 +513,7 @@ class DummySmartPlugDataSource:
                 "thd_voltage": round(thd_v, 5),
                 "thd_current": round(thd_i, 5),
                 "harmonics": harmonics,
-                "fft_normalization": "peak_amplitude = 2*abs(DFT_bin)/N",
+                "fft_normalization": "single_sided_peak_amplitude; internal bins use 2*abs(DFT_bin)/N",
             },
         }
 
@@ -555,7 +574,7 @@ class MessageParser:
 
         return WaveformPacket(
             timestamp=str(data.get("timestamp", now_str())),
-            duration_s=int(safe_float(data.get("duration_s"), 0.0)),
+            duration_s=safe_float(data.get("duration_s"), len(voltage_samples) / sampling_rate if sampling_rate else 0.0),
             sampling_rate_hz=sampling_rate,
             voltage_samples=voltage_samples,
             current_samples=current_samples,
@@ -830,9 +849,9 @@ class DashboardFrame(tk.Frame):
 
         main = tk.Frame(self, bg=Theme.BG)
         main.pack(expand=True, fill="both", padx=18, pady=(2, 8))
-        # Two-column dashboard: left side for live controls/waveform,
-        # right side for power triangle + system status. Keeping these widgets
-        # in the same right column guarantees equal width.
+        # Two-column dashboard: left side for live controls,
+        # right side for the power triangle. The waveform panel spans both
+        # columns so the plots get the full dashboard width.
         main.grid_columnconfigure(0, weight=3, uniform="dashboard_cols")
         main.grid_columnconfigure(1, weight=2, uniform="dashboard_cols")
         main.grid_rowconfigure(0, weight=0)
@@ -855,9 +874,10 @@ class DashboardFrame(tk.Frame):
         self.safety_panel.grid(row=0, column=1, sticky="nsew")
 
         self.waveform_panel = WaveformAnalysisPanel(main, app)
-        self.waveform_panel.grid(row=2, column=0, sticky="nsew", padx=(0, 10))
-        self.status_panel = StatusActivityPanel(main)
-        self.status_panel.grid(row=2, column=1, sticky="nsew", padx=(10, 0))
+        self.waveform_panel.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        # No visible System Status panel in v10. Keep a null sink so future
+        # MQTT/debug hooks can still call status methods without changing the GUI.
+        self.status_panel = NullStatusPanel()
 
     def _build_status_cards(self, parent: tk.Widget) -> None:
         cards_frame = tk.Frame(parent, bg=Theme.BG)
@@ -869,7 +889,7 @@ class DashboardFrame(tk.Frame):
         self.card_i = Card(cards_frame, "Current", "--", "A RMS", f"Nominal limit: {NOMINAL_CURRENT_ARMS:.0f} A RMS", Theme.PURPLE)
         self.card_p = Card(cards_frame, "Active Power", "--", "W", "Real power", Theme.GOOD)
         self.card_q = Card(cards_frame, "Reactive Power", "--", "var", "Quadrature power", Theme.WARN)
-        self.card_s = Card(cards_frame, "Apparent Power", "--", "VA", "Vrms × Irms", Theme.ACCENT_2)
+        self.card_s = Card(cards_frame, "Apparent Power", "--", "VA", "√(P² + Q²)", Theme.ACCENT_2)
         self.card_pf = Card(cards_frame, "Power Factor", "--", "", "cos φ", Theme.WARN)
         self.card_f = Card(cards_frame, "Frequency", "--", "Hz", "Mexico grid: 60 Hz", Theme.ACCENT_2)
         self.card_e = Card(cards_frame, "Energy", "--", "Wh", "Accumulated", Theme.PINK)
@@ -893,7 +913,7 @@ class DashboardFrame(tk.Frame):
         self.card_i.set(f"{sample.irms:.3f}", "A RMS", f"{sample.current_percent_nominal:.0f}% of 5 A RMS nominal", i_accent)
         self.card_p.set(f"{sample.active_power:.1f}", "W", "Real power delivered", Theme.GOOD)
         self.card_q.set(f"{sample.reactive_power:.1f}", "var", "Reactive component", Theme.WARN)
-        self.card_s.set(f"{sample.apparent_power_va:.1f}", "VA", "Calculated as Vrms × Irms", Theme.ACCENT_2)
+        self.card_s.set(f"{sample.apparent_power_va:.1f}", "VA", "Calculated as √(P² + Q²)", Theme.ACCENT_2)
         self.card_pf.set(f"{sample.pf:.3f}", "", "High is better for real power transfer", pf_accent)
         self.card_f.set(f"{sample.frequency:.2f}", "Hz", f"Δ vs 60 Hz: {sample.frequency - NOMINAL_FREQ_HZ:+.2f} Hz")
 
@@ -912,10 +932,10 @@ class DashboardFrame(tk.Frame):
         self.relay_panel.update_relay(sample.relay)
         self.status_panel.set_telemetry_state("Receiving smartplug/status", Theme.GOOD)
 
-    def set_collecting(self, collecting: bool, duration_s: int = 0) -> None:
+    def set_collecting(self, collecting: bool, duration_s: float = 0.0) -> None:
         self.waveform_panel.set_collecting(collecting, duration_s)
         if collecting:
-            self.status_panel.set_telemetry_state("Base telemetry paused for waveform capture", Theme.WARN)
+            self.status_panel.set_telemetry_state("Base telemetry paused for 512-sample waveform capture", Theme.WARN)
         else:
             self.status_panel.set_telemetry_state("Receiving smartplug/status", Theme.GOOD)
 
@@ -1054,24 +1074,86 @@ class PowerTrianglePanel(tk.Frame):
         self.summary = tk.Label(self, text="Waiting for telemetry…", bg=Theme.PANEL,
                                 fg=Theme.MUTED, font=("Segoe UI", 10), justify="left")
         self.summary.pack(anchor="w", pady=(6, 0))
+        self._display_p: Optional[float] = None
+        self._display_q: Optional[float] = None
+        self._display_pf: Optional[float] = None
+        self._target_p: float = 0.0
+        self._target_q: float = 0.0
+        self._target_pf: float = 0.0
+        self._animation_active: bool = False
 
     def update_triangle(self, sample: TelemetrySample) -> None:
+        self._target_p = abs(sample.active_power)
+        self._target_q = abs(sample.reactive_power)
+        self._target_pf = (
+            clamp(self._target_p / math.sqrt(self._target_p * self._target_p + self._target_q * self._target_q), 0.0, 1.0)
+            if (self._target_p > 0 or self._target_q > 0)
+            else 0.0
+        )
+        if self._display_p is None:
+            self._display_p = self._target_p
+            self._display_q = self._target_q
+            self._display_pf = self._target_pf
+            self._draw_triangle()
+            return
+        if not self._animation_active:
+            self._animation_active = True
+            self._animate_triangle()
+
+    def _animate_triangle(self) -> None:
+        # Smooth visual transition between telemetry packets. Lower alpha makes
+        # the P-Q-S triangle change more gracefully without blocking the GUI.
+        alpha = 0.11
+        self._display_p = (self._display_p or 0.0) + alpha * (self._target_p - (self._display_p or 0.0))
+        self._display_q = (self._display_q or 0.0) + alpha * (self._target_q - (self._display_q or 0.0))
+        self._display_pf = (self._display_pf or 0.0) + alpha * (self._target_pf - (self._display_pf or 0.0))
+        self._draw_triangle()
+        err = max(
+            abs(self._target_p - (self._display_p or 0.0)),
+            abs(self._target_q - (self._display_q or 0.0)),
+            abs(self._target_pf - (self._display_pf or 0.0)) * 100.0,
+        )
+        if err > 0.35:
+            self.after(35, self._animate_triangle)
+        else:
+            self._display_p = self._target_p
+            self._display_q = self._target_q
+            self._display_pf = self._target_pf
+            self._draw_triangle()
+            self._animation_active = False
+
+    def _draw_triangle(self) -> None:
         c = self.canvas
         c.delete("all")
         w = max(360, c.winfo_width())
         h = max(210, c.winfo_height())
         origin_x = 48
         base_y = h - 38
-        max_w = w - 120
+        # Slightly reduced drawable width leaves room for the vertical Q label.
+        max_w = w - 150
         max_h = h - 86
 
-        P = abs(sample.active_power)
-        Q = abs(sample.reactive_power)
-        S = max(sample.apparent_power_va, math.sqrt(P * P + Q * Q), 1.0)
-        scale = min(max_w / max(P, 1.0), max_h / max(Q, 1.0)) if Q > 1 else max_w / max(P, 1.0)
-        scale = min(scale, 1.0) if S > 500 else scale
-        p_px = min(max_w, max(40, P * scale))
-        q_px = min(max_h, max(20, Q * scale)) if Q > 1 else 0
+        P = abs(self._display_p or 0.0)
+        Q = abs(self._display_q or 0.0)
+        pf_display = clamp(self._display_pf or 0.0, 0.0, 1.0)
+        S = max(math.sqrt(P * P + Q * Q), 1.0)
+
+        if P <= 0.2 and Q <= 0.2:
+            scale = 1.0
+            p_px = 42
+            q_px = 0
+        else:
+            # The triangle must remain fully visible up to at least 650 W.
+            # Above ~600 W, reserve extra right-side margin instead of letting
+            # the P side use the whole canvas.
+            scale_candidates = [max_w / max(P, 1.0)]
+            if Q > 1.0:
+                scale_candidates.append(max_h / max(Q, 1.0))
+            if P >= 600.0:
+                scale_candidates.append((max_w * 0.92) / max(P, 1.0))
+            scale = min(scale_candidates)
+            p_px = min(max_w * 0.96, max(42, P * scale))
+            q_px = min(max_h, max(20, Q * scale)) if Q > 1 else 0
 
         x2 = origin_x + p_px
         y2 = base_y
@@ -1091,18 +1173,14 @@ class PowerTrianglePanel(tk.Frame):
         c.create_text((origin_x + x2) / 2, base_y + 18, text=f"P={P:.1f} W", fill=Theme.GOOD,
                       font=("Segoe UI", 9, "bold"))
 
-        # Q label is vertical so it remains readable without overflowing the
-        # right edge when active power is high.
         q_text = f"Q={Q:.1f} var"
-        q_label_x = min(w - 28, x3 + 22)
+        q_label_x = min(w - 34, x3 + 22)
         c.create_text(q_label_x, (y2 + y3) / 2, angle=90, text=q_text, fill=Theme.WARN,
                       font=("Segoe UI", 9, "bold"))
 
-        # S label is offset away from the hypotenuse and placed on a small
-        # background tag so the line does not cross the text.
         s_text = f"S≈{S:.1f} VA"
-        s_x = (origin_x + x3) / 2 - 14
-        s_y = (base_y + y3) / 2 - 24
+        s_x = clamp((origin_x + x3) / 2 - 14, origin_x + 70, w - 110)
+        s_y = clamp((base_y + y3) / 2 - 24, 42, base_y - 30)
         bbox_pad_x, bbox_pad_y = 6, 3
         approx_w = 7 * len(s_text)
         c.create_rectangle(s_x - approx_w/2 - bbox_pad_x, s_y - 9 - bbox_pad_y,
@@ -1110,8 +1188,8 @@ class PowerTrianglePanel(tk.Frame):
                            fill=Theme.PANEL, outline=Theme.BORDER)
         c.create_text(s_x, s_y, text=s_text, fill=Theme.ACCENT, font=("Segoe UI", 9, "bold"))
 
-        angle_deg = math.degrees(math.acos(clamp(sample.pf, -1.0, 1.0))) if sample.pf > 0 else 0.0
-        self.summary.configure(text=f"PF={sample.pf:.3f} · φ≈{angle_deg:.1f}° · P={P:.1f} W · Q={Q:.1f} var · S≈{S:.1f} VA")
+        angle_deg = math.degrees(math.atan2(Q, P)) if (P > 0 or Q > 0) else 0.0
+        self.summary.configure(text=f"PF≈{pf_display:.3f} · φ≈{angle_deg:.1f}° · P={P:.1f} W · Q={Q:.1f} var · S≈{S:.1f} VA")
 
 
 class MiniMetric(tk.Frame):
@@ -1136,8 +1214,6 @@ class WaveformAnalysisPanel(tk.Frame):
         self.app = app
         self.packet: Optional[WaveformPacket] = None
         self.signal_var = tk.StringVar(value="Voltage")
-        self.duration_var = tk.StringVar(value="2")
-        self.scroll_var = tk.IntVar(value=0)
 
         header = tk.Frame(self, bg=Theme.PANEL)
         header.pack(fill="x")
@@ -1145,17 +1221,14 @@ class WaveformAnalysisPanel(tk.Frame):
                  font=("Segoe UI", 14, "bold")).pack(side="left")
         controls = tk.Frame(header, bg=Theme.PANEL)
         controls.pack(side="right")
-        tk.Label(controls, text="Duration", bg=Theme.PANEL, fg=Theme.MUTED,
-                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
-        ttk.Combobox(controls, textvariable=self.duration_var, values=["1", "2", "3", "4", "5"],
-                     state="readonly", width=4).pack(side="left")
-        tk.Label(controls, text="s", bg=Theme.PANEL, fg=Theme.MUTED).pack(side="left", padx=(3, 8))
+        tk.Label(controls, text="512 samples · ~73.25 ms", bg=Theme.PANEL, fg=Theme.MUTED,
+                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 8))
         tk.Button(controls, text="Request waveform", bg=Theme.ACCENT, fg=Theme.BLACK,
                   activebackground=Theme.ACCENT_2, relief="flat", padx=10, pady=5,
                   font=("Segoe UI", 9, "bold"), command=self._request_waveform).pack(side="left")
 
         self.status_label = tk.Label(self,
-            text="No waveform capture yet. Request a 1–5 s capture to visualize instantaneous samples, harmonic content and THD.",
+            text="No waveform capture yet. Request one 512-sample capture to visualize instantaneous samples, harmonic content and THD.",
             bg=Theme.PANEL, fg=Theme.MUTED, font=("Segoe UI", 10), anchor="w", justify="left")
         self.status_label.pack(fill="x", pady=(4, 5))
 
@@ -1179,7 +1252,7 @@ class WaveformAnalysisPanel(tk.Frame):
         wave_box = tk.Frame(body, bg=Theme.CARD, highlightbackground=Theme.BORDER, highlightthickness=1)
         wave_box.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         wave_box.grid_columnconfigure(0, weight=1)
-        wave_box.grid_rowconfigure(2, weight=1)
+        wave_box.grid_rowconfigure(1, weight=1)
 
         wave_header = tk.Frame(wave_box, bg=Theme.CARD)
         wave_header.grid(row=0, column=0, sticky="ew", padx=10, pady=(6, 1))
@@ -1189,25 +1262,8 @@ class WaveformAnalysisPanel(tk.Frame):
                      state="readonly", width=10).pack(side="right")
         self.signal_var.trace_add("write", lambda *_: (self.draw_waveform(), self.draw_fft()))
 
-        # The scroll control is intentionally above the plot so it remains
-        # visible on 1080p displays even when the bottom of the window is close
-        # to the taskbar. It moves the plotted time window across the buffer.
-        scroll_frame = tk.Frame(wave_box, bg=Theme.CARD)
-        scroll_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 2))
-        tk.Label(scroll_frame, text="Waveform window", bg=Theme.CARD, fg=Theme.MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 8))
-        self.scroll = tk.Scale(scroll_frame, from_=0, to=0, orient="horizontal", variable=self.scroll_var,
-                               bg=Theme.CARD, fg=Theme.MUTED, troughcolor=Theme.ACCENT,
-                               activebackground=Theme.ACCENT_2, highlightthickness=0,
-                               showvalue=False, length=360, sliderlength=20, width=8,
-                               state="disabled", font=("Segoe UI", 7), command=lambda _v: self.draw_waveform())
-        self.scroll.pack(side="left", fill="x", expand=True)
-        self.scroll_value_label = tk.Label(scroll_frame, text="0.000 s", bg=Theme.CARD, fg=Theme.MUTED,
-                                           font=("Segoe UI", 8, "bold"), width=9, anchor="e")
-        self.scroll_value_label.pack(side="left", padx=(8, 0))
-
-        self.wave_canvas = tk.Canvas(wave_box, bg=Theme.CARD, highlightthickness=0, height=190)
-        self.wave_canvas.grid(row=2, column=0, sticky="nsew", padx=8, pady=(1, 6))
+        self.wave_canvas = tk.Canvas(wave_box, bg=Theme.CARD, highlightthickness=0, height=230)
+        self.wave_canvas.grid(row=1, column=0, sticky="nsew", padx=8, pady=(4, 6))
 
         fft_box = tk.Frame(body, bg=Theme.CARD, highlightbackground=Theme.BORDER, highlightthickness=1)
         fft_box.grid(row=0, column=1, sticky="nsew")
@@ -1218,17 +1274,13 @@ class WaveformAnalysisPanel(tk.Frame):
         tk.Button(fft_header, text="FFT table", bg=Theme.PANEL_2, fg=Theme.TEXT,
                   activebackground=Theme.BORDER, relief="flat", padx=8, pady=2,
                   font=("Segoe UI", 8, "bold"), command=self.show_fft_table).pack(side="right")
-        self.fft_canvas = tk.Canvas(fft_box, bg=Theme.CARD, highlightthickness=0, height=205)
+        self.fft_canvas = tk.Canvas(fft_box, bg=Theme.CARD, highlightthickness=0, height=230)
         self.fft_canvas.pack(fill="both", expand=True, padx=8, pady=(2, 6))
 
         self.after(500, self._draw_placeholders)
 
     def _request_waveform(self) -> None:
-        try:
-            duration = int(self.duration_var.get())
-        except ValueError:
-            duration = 2
-        self.app.publish_waveform_request(int(clamp(duration, 1, 5)))
+        self.app.publish_waveform_request()
 
     def _draw_placeholders(self) -> None:
         if self.packet is None:
@@ -1239,9 +1291,7 @@ class WaveformAnalysisPanel(tk.Frame):
             self.thd_v_metric.set("--")
             self.thd_i_metric.set("--")
             self.samples_metric.set("--")
-            self.fs_metric.set("2400 Hz")
-            self.scroll.configure(state="disabled", to=0)
-            self.scroll_value_label.configure(text="0.000 s")
+            self.fs_metric.set(f"{SAMPLE_RATE_HZ} Hz")
 
     def _center_text(self, canvas: tk.Canvas, text: str) -> None:
         w = max(260, canvas.winfo_width())
@@ -1259,22 +1309,19 @@ class WaveformAnalysisPanel(tk.Frame):
             width=max(120, w - 2 * pad_x - 18),
         )
 
-    def set_collecting(self, collecting: bool, duration_s: int = 0) -> None:
+    def set_collecting(self, collecting: bool, duration_s: float = 0.0) -> None:
         if collecting:
-            self.status_label.configure(text=f"Collecting instantaneous samples for {duration_s} s… Base telemetry is temporarily paused.", fg=Theme.WARN)
+            self.status_label.configure(text="Collecting 512 instantaneous samples at 6.99 kHz… Base telemetry is temporarily paused.", fg=Theme.WARN)
         else:
             if self.packet is None:
-                self.status_label.configure(text="No waveform capture yet. Request a 1–5 s capture to visualize instantaneous samples, harmonic content and THD.", fg=Theme.MUTED)
+                self.status_label.configure(text="No waveform capture yet. Request one 512-sample capture to visualize instantaneous samples, harmonic content and THD.", fg=Theme.MUTED)
             else:
-                self.status_label.configure(text="Waveform capture received. Use the horizontal slider to move through captured cycles.", fg=Theme.GOOD)
+                ms = 1000.0 * self.packet.duration_s
+                cycles = self.packet.duration_s * self.packet.fundamental_hz
+                self.status_label.configure(text=f"Waveform capture received: 512 samples · {ms:.2f} ms · ~{cycles:.2f} cycles at 60 Hz.", fg=Theme.GOOD)
 
     def update_packet(self, packet: WaveformPacket) -> None:
         self.packet = packet
-        window_samples = min(packet.sampling_rate_hz // 5, len(packet.voltage_samples))
-        max_start = max(0, len(packet.voltage_samples) - window_samples)
-        self.scroll.configure(to=max_start, resolution=max(1, packet.sampling_rate_hz // 60), state="normal")
-        self.scroll_var.set(0)
-        self.scroll_value_label.configure(text="0.000 s")
         self.set_collecting(False)
         self.thd_v_metric.set(f"{100.0 * packet.thd_voltage:.2f} %")
         self.thd_i_metric.set(f"{100.0 * packet.thd_current:.2f} %")
@@ -1301,13 +1348,12 @@ class WaveformAnalysisPanel(tk.Frame):
         h = max(200, c.winfo_height())
         # Extra bottom padding is intentional: it leaves room for time ticks and
         # prevents the lower part of the sine wave / axis labels from being clipped.
-        pad_l, pad_r, pad_t, pad_b = 58, 18, 22, 50
+        pad_l, pad_r, pad_t, pad_b = 78, 20, 24, 52
         plot_w = max(20, w - pad_l - pad_r)
         plot_h = max(40, h - pad_t - pad_b)
-        window_samples = min(self.packet.sampling_rate_hz // 5, len(samples))
-        start = int(clamp(self.scroll_var.get(), 0, max(0, len(samples) - window_samples)))
-        end = start + window_samples
-        view = samples[start:end]
+        start = 0
+        end = len(samples)
+        view = samples
         if len(view) < 2:
             return
         ymin, ymax = min(view), max(view)
@@ -1322,10 +1368,8 @@ class WaveformAnalysisPanel(tk.Frame):
 
         t0 = start / self.packet.sampling_rate_hz
         t1 = end / self.packet.sampling_rate_hz
-        self.scroll_value_label.configure(text=f"{t0:.3f} s")
-
         # Time grid and tick labels in seconds.
-        tick_count = 5
+        tick_count = 6
         for i in range(tick_count):
             frac = i / (tick_count - 1)
             x = pad_l + frac * plot_w
@@ -1333,9 +1377,14 @@ class WaveformAnalysisPanel(tk.Frame):
             c.create_line(x, pad_t, x, pad_t + plot_h, fill="#24324a")
             c.create_line(x, pad_t + plot_h, x, pad_t + plot_h + 5, fill=Theme.MUTED)
             c.create_text(x, pad_t + plot_h + 17, text=f"{tick_t:.3f}", fill=Theme.MUTED, font=("Segoe UI", 7))
-        for i in range(1, 4):
-            y = pad_t + i * plot_h / 4
+        y_tick_count = 5
+        for i in range(y_tick_count):
+            frac = i / (y_tick_count - 1)
+            y = pad_t + frac * plot_h
+            value = ymax - frac * span
             c.create_line(pad_l, y, pad_l + plot_w, y, fill="#24324a")
+            c.create_line(pad_l - 5, y, pad_l, y, fill=Theme.MUTED)
+            c.create_text(pad_l - 8, y, anchor="e", text=f"{value:.2f}", fill=Theme.MUTED, font=("Segoe UI", 7))
 
         points: List[float] = []
         for idx, value in enumerate(view):
@@ -1346,11 +1395,10 @@ class WaveformAnalysisPanel(tk.Frame):
             c.create_line(points, fill=accent, width=2, smooth=True)
 
         c.create_text(pad_l + plot_w / 2, h - 10, text="time [s]", fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
-        c.create_text(14, pad_t + plot_h / 2, text=f"{unit}", angle=90, fill=accent, font=("Segoe UI", 8, "bold"))
+        c.create_text(18, pad_t + plot_h / 2, text=f"{unit}", angle=90, fill=accent, font=("Segoe UI", 8, "bold"))
         c.create_text(pad_l, 10, anchor="w", text=f"{signal_name} instantaneous [{unit}]", fill=accent, font=("Segoe UI", 9, "bold"))
         c.create_text(pad_l + plot_w, 10, anchor="e", text=f"Fs={self.packet.sampling_rate_hz} Hz", fill=Theme.MUTED, font=("Segoe UI", 8))
-        c.create_text(pad_l - 6, pad_t, anchor="e", text=f"{ymax:.2f}", fill=Theme.MUTED, font=("Segoe UI", 7))
-        c.create_text(pad_l - 6, pad_t + plot_h, anchor="e", text=f"{ymin:.2f}", fill=Theme.MUTED, font=("Segoe UI", 7))
+        # Y-axis tick labels are drawn in the grid loop above.
 
     def draw_fft(self) -> None:
         c = self.fft_canvas
@@ -1362,7 +1410,7 @@ class WaveformAnalysisPanel(tk.Frame):
         key = "voltage_mag_vpk" if signal_name == "Voltage" else "current_mag_apk"
         unit = "Vpk" if signal_name == "Voltage" else "Apk"
         accent = Theme.ACCENT if signal_name == "Voltage" else Theme.PURPLE
-        harmonics = self.packet.harmonics[:MAX_HARMONIC_ORDER]
+        harmonics = self.packet.harmonics[:MAX_PLOT_HARMONIC_ORDER]
         values = [safe_float(h.get(key)) for h in harmonics]
         freqs = [int(round(safe_float(h.get("frequency_hz", (idx + 1) * NOMINAL_FREQ_HZ)))) for idx, h in enumerate(harmonics)]
         max_val = max(max(values) if values else 1.0, 1e-9)
@@ -1370,13 +1418,18 @@ class WaveformAnalysisPanel(tk.Frame):
         w = max(260, c.winfo_width())
         h = max(200, c.winfo_height())
         # More bottom padding so the x-axis can show actual harmonic frequencies.
-        pad_l, pad_r, pad_t, pad_b = 52, 18, 24, 58
+        pad_l, pad_r, pad_t, pad_b = 70, 18, 24, 58
         plot_w = max(20, w - pad_l - pad_r)
         plot_h = max(40, h - pad_t - pad_b)
         c.create_rectangle(pad_l, pad_t, pad_l + plot_w, pad_t + plot_h, outline=Theme.BORDER)
-        for i in range(1, 4):
-            y = pad_t + i * plot_h / 4
+        y_tick_count = 5
+        for i in range(y_tick_count):
+            frac = i / (y_tick_count - 1)
+            y = pad_t + frac * plot_h
+            value = max_val * (1.0 - frac)
             c.create_line(pad_l, y, pad_l + plot_w, y, fill="#24324a")
+            c.create_line(pad_l - 5, y, pad_l, y, fill=Theme.MUTED)
+            c.create_text(pad_l - 8, y, anchor="e", text=f"{value:.2f}", fill=Theme.MUTED, font=("Segoe UI", 7))
 
         bar_gap = 2
         bar_w = max(3, (plot_w / max(1, len(values))) - bar_gap)
@@ -1393,8 +1446,8 @@ class WaveformAnalysisPanel(tk.Frame):
                           fill=Theme.MUTED, font=("Segoe UI", 7, "bold"))
 
         c.create_text(pad_l, 10, anchor="w", text=f"FFT amplitude [{unit}]", fill=accent, font=("Segoe UI", 8, "bold"))
-        c.create_text(pad_l - 5, pad_t, anchor="e", text=f"{max_val:.2f}", fill=Theme.MUTED, font=("Segoe UI", 7))
-        c.create_text(11, pad_t + plot_h / 2, text=unit, angle=90, fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
+        # Y-axis tick labels are drawn in the grid loop above.
+        c.create_text(18, pad_t + plot_h / 2, text=unit, angle=90, fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
         c.create_text(pad_l + plot_w / 2, h - 8, text="Frequency [Hz]", fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
 
 
@@ -1417,7 +1470,8 @@ class WaveformAnalysisPanel(tk.Frame):
                  font=("Segoe UI", 14, "bold")).pack(anchor="w")
         tk.Label(header,
                  text=("Peak amplitudes normalized as 2·|DFT bin|/N. "
-                       "THD is computed from harmonic amplitudes relative to the 60 Hz fundamental."),
+                       "THD is computed from harmonics relative to the 60 Hz fundamental. "
+                       "Table includes all integer 60 Hz harmonics below Nyquist."),
                  bg=Theme.BG, fg=Theme.MUTED, font=("Segoe UI", 9),
                  wraplength=570, justify="left").pack(anchor="w", pady=(2, 0))
 
@@ -1440,7 +1494,7 @@ class WaveformAnalysisPanel(tk.Frame):
         tree.pack(side="left", expand=True, fill="both")
         scroll.pack(side="right", fill="y")
 
-        for h in self.packet.harmonics[:MAX_HARMONIC_ORDER]:
+        for h in self.packet.harmonics:
             order = int(safe_float(h.get("order")))
             freq = safe_float(h.get("frequency_hz"))
             vpk = safe_float(h.get("voltage_mag_vpk"))
@@ -1455,6 +1509,17 @@ class WaveformAnalysisPanel(tk.Frame):
         tk.Button(footer, text="Close", bg=Theme.PANEL_2, fg=Theme.TEXT,
                   activebackground=Theme.BORDER, relief="flat", padx=12, pady=4,
                   command=win.destroy).pack(side="right")
+
+
+class NullStatusPanel:
+    """No-op sink used after removing the visible System Status panel."""
+    def set_telemetry_state(self, *args: Any, **kwargs: Any) -> None: pass
+    def set_protection(self, *args: Any, **kwargs: Any) -> None: pass
+    def clear_protection_after_retry(self, *args: Any, **kwargs: Any) -> None: pass
+    def set_command(self, *args: Any, **kwargs: Any) -> None: pass
+    def set_ack(self, *args: Any, **kwargs: Any) -> None: pass
+    def set_waveform(self, *args: Any, **kwargs: Any) -> None: pass
+    def add(self, *args: Any, **kwargs: Any) -> None: pass
 
 
 class StatusActivityPanel(tk.Frame):
@@ -1691,7 +1756,7 @@ class SmartPlugApp:
         self.dashboard_frame.set_collecting(False)
         self.dashboard_frame.waveform_panel.update_packet(packet)
         self.dashboard_frame.status_panel.set_waveform(
-            f"Waveform OK · {packet.duration_s}s · {len(packet.voltage_samples):,} samples · THD_V={100*packet.thd_voltage:.2f}%",
+            f"Waveform OK · 512 samples · {1000*packet.duration_s:.2f} ms · THD_V={100*packet.thd_voltage:.2f}%",
             Theme.GOOD,
         )
         self.log("Waveform received; FFT/THD updated.", level="success")
@@ -1707,17 +1772,16 @@ class SmartPlugApp:
         self._publish_to_device(TOPIC_SAFETY_CMD, payload)
         self.data_source.set_safety_limits(max_vrms, max_iarms)
 
-    def publish_waveform_request(self, duration_s: int) -> None:
-        duration_s = int(clamp(duration_s, 1, 5))
+    def publish_waveform_request(self) -> None:
         if self.collecting_waveform:
             self.log("Waveform request ignored: capture already in progress.", level="warning")
             return
-        payload = json.dumps({"duration_s": duration_s, "source": "GUI", "timestamp": now_str()})
+        payload = json.dumps({"command_type": "REQUEST_WAVEFORM", "sample_count": WAVEFORM_SAMPLE_COUNT, "source": "GUI", "timestamp": now_str()})
         self._publish_to_device(TOPIC_WAVEFORM_CMD, payload)
         self.collecting_waveform = True
-        self.dashboard_frame.set_collecting(True, duration_s)
-        self.dashboard_frame.status_panel.set_waveform(f"Collecting {duration_s} s of instantaneous samples…", Theme.WARN)
-        self.data_source.request_waveform_capture(duration_s)
+        self.dashboard_frame.set_collecting(True, WAVEFORM_CAPTURE_SECONDS)
+        self.dashboard_frame.status_panel.set_waveform("Collecting 512 samples at 6.99 kHz…", Theme.WARN)
+        self.data_source.request_waveform_capture()
 
     def _publish_to_device(self, topic: str, payload: str) -> None:
         # Future MQTT integration point.
@@ -1728,11 +1792,7 @@ class SmartPlugApp:
                 elif topic == TOPIC_SAFETY_CMD:
                     display_payload = payload.replace('"', '')
                 elif topic == TOPIC_WAVEFORM_CMD:
-                    try:
-                        duration = json.loads(payload).get("duration_s", "?")
-                        display_payload = f"request {duration}s waveform"
-                    except Exception:
-                        display_payload = "waveform request"
+                    display_payload = "request 512-sample waveform"
                 else:
                     display_payload = payload
                 self.dashboard_frame.status_panel.set_command(f"{topic} → {display_payload}")
