@@ -508,30 +508,32 @@ void app_main(void)
             ade_irq_pending = true;
         }
         if (ade_irq_pending == true) {
-            g_relay_on = false;            // Sync the MQTT payload state
-            aice_set_status(STATUS_ERROR); // Turn the LED Red
+            if (!critical_protection_active) {
+                g_relay_on = false;            // Sync the MQTT payload state
+                aice_set_status(STATUS_ERROR); // Turn the LED Red
 
-            ESP_LOGE(TAG, "Hardware Safety Trip! Relay physically opened by ISR.");
-            
-            // Read events to log the exact cause
-            ade7953_events_t events = {0};
-            if (module_ade7953_read_events(&events, true) == ESP_OK) {
-                if (events.overcurrent_a || events.overcurrent_b) {
-                    ESP_LOGE(TAG, "Cause: OVERCURRENT");
+                ESP_LOGE(TAG, "Hardware Safety Trip! Relay physically opened by ISR.");
+                
+                // Read events to log the exact cause
+                ade7953_events_t events = {0};
+                if (module_ade7953_read_events(&events, true) == ESP_OK) {
+                    if (events.overcurrent_a || events.overcurrent_b) {
+                        ESP_LOGE(TAG, "Cause: OVERCURRENT");
+                    }
+                    if (events.overvoltage) {
+                        ESP_LOGE(TAG, "Cause: OVERVOLTAGE");
+                    }
+                    critical_protection_irq_events = events;
+                    critical_protection_irq_events_valid = true;
+                } else {
+                    critical_protection_irq_events_valid = false;
                 }
-                if (events.overvoltage) {
-                    ESP_LOGE(TAG, "Cause: OVERVOLTAGE");
-                }
-                critical_protection_irq_events = events;
-                critical_protection_irq_events_valid = true;
-            } else {
-                critical_protection_irq_events_valid = false;
-            }
 
-            critical_protection_active = true;
-            critical_protection_report_pending = true;
-            if (critical_protection_started_ms == 0) {
-                critical_protection_started_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+                critical_protection_active = true;
+                critical_protection_report_pending = true;
+                if (critical_protection_started_ms == 0) {
+                    critical_protection_started_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+                }
             }
         }
 
