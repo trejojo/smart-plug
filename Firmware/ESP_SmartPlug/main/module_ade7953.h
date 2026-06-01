@@ -445,6 +445,7 @@ esp_err_t module_ade7953_read_raw_measurement(ade7953_raw_measurement_t *out_raw
 esp_err_t module_ade7953_read_measurement(ade7953_measurement_t *out_measurement,
                                           bool read_energy_deltas,
                                           bool clear_irq_status);
+esp_err_t module_ade7953_start_snapshot_capture(void);
 esp_err_t module_ade7953_read_events(ade7953_events_t *out_events, bool clear_latched);
 esp_err_t module_ade7953_read_peaks(uint32_t *vpeak, uint32_t *iapeak, uint32_t *ibpeak,
                                     bool reset_after_read);

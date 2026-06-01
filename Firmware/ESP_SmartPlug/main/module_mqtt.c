@@ -1,6 +1,7 @@
 #include "module_mqtt.h"
 #include "mqtt_client.h"
 #include "esp_log.h"
+#include "module_ade7953.h"
 #include "module_relay.h"
 #include <inttypes.h>
 #include <stdio.h>
@@ -46,6 +47,26 @@ static void publish_safety_limits_ack(float max_vrms, float max_iarms, bool acce
 		ESP_LOGE(TAG, "Failed to publish safety-limit acknowledgment");
 	} else {
 		ESP_LOGI(TAG, "Published safety-limit acknowledgment: %s (msg_id: %d)", ack_payload, ack_msg_id);
+	}
+}
+
+static void publish_waveform_request_ack(bool accepted, const char *reason)
+{
+	char ack_payload[256];
+	snprintf(ack_payload, sizeof(ack_payload),
+	         "{"
+	         "\"event_type\":\"WAVEFORM_REQUEST\"," 
+	         "\"accepted\":%s,"
+	         "\"reason\":\"%s\""
+	         "}",
+	         accepted ? "true" : "false",
+	         reason != NULL ? reason : "unknown");
+
+	int ack_msg_id = esp_mqtt_client_publish(mqtt_client, "aice/status", ack_payload, 0, 1, 0);
+	if (ack_msg_id == -1) {
+		ESP_LOGE(TAG, "Failed to publish waveform-request acknowledgment");
+	} else {
+		ESP_LOGI(TAG, "Published waveform-request acknowledgment: %s (msg_id: %d)", ack_payload, ack_msg_id);
 	}
 }
 
@@ -127,6 +148,21 @@ static void handle_safety_limits_command(const esp_mqtt_event_handle_t event)
 	if (root == NULL) {
 		ESP_LOGW(TAG, "Invalid safety-limit JSON: %s", payload);
 		publish_safety_limits_ack(0.0f, 0.0f, false, "invalid json");
+		return;
+	}
+
+	cJSON *action_item = cJSON_GetObjectItemCaseSensitive(root, "action");
+	if (cJSON_IsString(action_item) && action_item->valuestring != NULL &&
+	    (strcmp(action_item->valuestring, "send_waveform") == 0 || strcmp(action_item->valuestring, "capture_wave") == 0)) {
+		esp_err_t waveform_ret = module_ade7953_start_snapshot_capture();
+		if (waveform_ret == ESP_OK) {
+			ESP_LOGI(TAG, "Waveform request received from GUI: starting 512-sample snapshot");
+			publish_waveform_request_ack(true, "snapshot started");
+		} else {
+			ESP_LOGW(TAG, "Waveform request rejected: %s", esp_err_to_name(waveform_ret));
+			publish_waveform_request_ack(false, esp_err_to_name(waveform_ret));
+		}
+		cJSON_Delete(root);
 		return;
 	}
 

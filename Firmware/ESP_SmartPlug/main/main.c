@@ -38,12 +38,12 @@ static gpio_num_t s_relay_gpio = GPIO_NUM_NC;
 static gpio_num_t s_ade_irq_gpio = GPIO_NUM_NC;
 
 #ifndef ENABLE_WAVEFORM_STREAM
-#define ENABLE_WAVEFORM_STREAM 0
+#define ENABLE_WAVEFORM_STREAM 1
 #endif
 
 #if ENABLE_WAVEFORM_STREAM
-#define WAVEFORM_CHUNK_SIZE 200
-#define WAVEFORM_JSON_SCRATCHPAD_SIZE 4096
+#define WAVEFORM_CHUNK_SIZE 512
+#define WAVEFORM_JSON_SCRATCHPAD_SIZE 16384
 
 static int32_t s_raw_v_buf0[WAVEFORM_CHUNK_SIZE];
 static int32_t s_raw_i_buf0[WAVEFORM_CHUNK_SIZE];
@@ -55,6 +55,8 @@ static volatile uint16_t s_chunk_index = 0;
 static volatile uint8_t s_ready_buffer = 0;
 static volatile uint16_t s_ready_count = 0;
 static volatile bool s_chunk_ready = false;
+static volatile bool s_snapshot_request_pending = false;
+static volatile bool s_snapshot_active = false;
 static TaskHandle_t s_waveform_capture_task_handle = NULL;
 static TaskHandle_t s_waveform_pub_task_handle = NULL;
 static portMUX_TYPE s_waveform_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -76,6 +78,39 @@ static void IRAM_ATTR ade7953_waveform_irq_handler(void *arg)
     }
 }
 
+esp_err_t module_ade7953_start_snapshot_capture(void)
+{
+    if (s_waveform_capture_task_handle == NULL || s_waveform_pub_task_handle == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    portENTER_CRITICAL(&s_waveform_mux);
+    if (s_snapshot_request_pending || s_snapshot_active) {
+        portEXIT_CRITICAL(&s_waveform_mux);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_active_buffer = 0;
+    s_chunk_index = 0;
+    s_ready_buffer = 0;
+    s_ready_count = 0;
+    s_chunk_ready = false;
+    s_snapshot_request_pending = true;
+    portEXIT_CRITICAL(&s_waveform_mux);
+
+    esp_err_t irq_ret = module_ade7953_configure_irq_masks(ADE7953_IRQ_A_OV | ADE7953_IRQ_A_OIA | ADE7953_IRQ_A_WSMP, 0);
+    if (irq_ret != ESP_OK) {
+        portENTER_CRITICAL(&s_waveform_mux);
+        s_snapshot_request_pending = false;
+        portEXIT_CRITICAL(&s_waveform_mux);
+        return irq_ret;
+    }
+
+    xTaskNotifyGive(s_waveform_capture_task_handle);
+    ESP_LOGI(TAG, "Waveform snapshot requested: %d samples", WAVEFORM_CHUNK_SIZE);
+    return ESP_OK;
+}
+
 static void waveform_stream_task(void *pvParameters)
 {
     s_waveform_pub_task_handle = xTaskGetCurrentTaskHandle();
@@ -89,6 +124,21 @@ static void waveform_stream_task(void *pvParameters)
 
     while (true) {
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+
+        if (!s_snapshot_active) {
+            bool start_requested = false;
+            portENTER_CRITICAL(&s_waveform_mux);
+            if (s_snapshot_request_pending) {
+                s_snapshot_request_pending = false;
+                s_snapshot_active = true;
+                start_requested = true;
+            }
+            portEXIT_CRITICAL(&s_waveform_mux);
+
+            if (!start_requested) {
+                continue;
+            }
+        }
 
         int32_t *v_ptr = NULL;
         int32_t *i_ptr = NULL;
@@ -162,7 +212,15 @@ static void waveform_stream_task(void *pvParameters)
         esp_err_t publish_ret = module_mqtt_publish_waveform_chunk(json_scratchpad);
         if (publish_ret != ESP_OK) {
             ESP_LOGW(TAG, "Waveform chunk publish failed: %s", esp_err_to_name(publish_ret));
+        } else {
+            ESP_LOGI(TAG, "Waveform snapshot sent successfully");
         }
+
+        portENTER_CRITICAL(&s_waveform_mux);
+        s_snapshot_active = false;
+        portEXIT_CRITICAL(&s_waveform_mux);
+
+        ESP_ERROR_CHECK_WITHOUT_ABORT(module_ade7953_configure_irq_masks(ADE7953_IRQ_A_OV | ADE7953_IRQ_A_OIA, 0));
     }
 
     free(json_scratchpad);
@@ -419,13 +477,19 @@ static void waveform_capture_task(void *pvParameters)
 
     s_waveform_capture_task_handle = xTaskGetCurrentTaskHandle();
 
+    ESP_ERROR_CHECK_WITHOUT_ABORT(module_ade7953_configure_irq_masks(ADE7953_IRQ_A_OV | ADE7953_IRQ_A_OIA, 0));
+
     while (true) {
         if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) == 0) {
             continue;
         }
 
+        if (!s_snapshot_active) {
+            continue;
+        }
+
         ade7953_events_t events = {0};
-        if (module_ade7953_read_events(&events, false) != ESP_OK || !events.waveform_sample_ready) {
+        if (module_ade7953_read_events(&events, true) != ESP_OK || !events.waveform_sample_ready) {
             continue;
         }
 
