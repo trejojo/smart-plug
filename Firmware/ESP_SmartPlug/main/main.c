@@ -36,6 +36,8 @@ static const uint16_t MQTT_BROKER_PORT = 1883;
 static TaskHandle_t s_main_task_handle = NULL;
 static gpio_num_t s_relay_gpio = GPIO_NUM_NC;
 static gpio_num_t s_ade_irq_gpio = GPIO_NUM_NC;
+static volatile bool g_gui_relay_toggle_requested = false;
+static portMUX_TYPE g_gui_relay_request_mux = portMUX_INITIALIZER_UNLOCKED;
 
 #ifndef ENABLE_WAVEFORM_STREAM
 #define ENABLE_WAVEFORM_STREAM 1
@@ -329,6 +331,70 @@ static esp_err_t aice_apply_safety_limits_update(float max_vrms, float max_iarms
     }
 
     return ESP_OK;
+}
+
+static esp_err_t aice_queue_relay_command(const char *action, void *user_data)
+{
+    (void)user_data;
+
+    if (action == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (strcmp(action, "toggle_relay") != 0 && strcmp(action, "relay_toggle") != 0 && strcmp(action, "RELAY_TOGGLE") != 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    portENTER_CRITICAL(&g_gui_relay_request_mux);
+    g_gui_relay_toggle_requested = true;
+    portEXIT_CRITICAL(&g_gui_relay_request_mux);
+
+    return ESP_OK;
+}
+
+static void aice_handle_relay_toggle_request(const char *source,
+                                             bool credentials_in_nvs,
+                                             bool *critical_protection_active,
+                                             uint64_t *critical_protection_started_ms)
+{
+    if (critical_protection_active == NULL || critical_protection_started_ms == NULL) {
+        return;
+    }
+
+    if (*critical_protection_active) {
+        ade7953_measurement_t recovery_measurement = {0};
+        ade7953_safety_decision_t recovery_decision = {0};
+        esp_err_t recovery_ret = module_ade7953_read_measurement(&recovery_measurement, true, true);
+        if (recovery_ret == ESP_OK) {
+            module_ade7953_evaluate_safety(&recovery_measurement, &g_ade_policy.safety_limits, &recovery_decision);
+            if (!recovery_decision.trip) {
+                *critical_protection_active = false;
+                *critical_protection_started_ms = 0;
+                g_relay_on = true;
+                module_relay_set(true);
+                ESP_ERROR_CHECK_WITHOUT_ABORT(module_mqtt_publish_relay(g_relay_on));
+                ESP_LOGI(TAG, "%s: critical protection cleared, relay closed", source != NULL ? source : "Relay request");
+                aice_refresh_network_state(credentials_in_nvs);
+            } else {
+                module_relay_set(false);
+                g_relay_on = false;
+                ESP_ERROR_CHECK_WITHOUT_ABORT(module_mqtt_publish_relay(g_relay_on));
+                aice_set_status(STATUS_ERROR);
+                ESP_LOGW(TAG, "%s ignored: protection condition still present", source != NULL ? source : "Relay request");
+            }
+        } else {
+            module_relay_set(false);
+            g_relay_on = false;
+            ESP_ERROR_CHECK_WITHOUT_ABORT(module_mqtt_publish_relay(g_relay_on));
+            aice_set_status(STATUS_ERROR);
+            ESP_LOGW(TAG, "%s could not verify recovery: %s", source != NULL ? source : "Relay request", esp_err_to_name(recovery_ret));
+        }
+    } else {
+        g_relay_on = !g_relay_on;
+        module_relay_set(g_relay_on);
+        ESP_ERROR_CHECK_WITHOUT_ABORT(module_mqtt_publish_relay(g_relay_on));
+        ESP_LOGI(TAG, "%s: Relay toggled %s", source != NULL ? source : "Relay request", g_relay_on ? "ON" : "OFF");
+    }
 }
 
 static bool ade7953_service_and_should_trip(const ade7953_measurement_t *measurement,
@@ -637,6 +703,7 @@ void app_main(void)
     ESP_ERROR_CHECK(module_wifi_init());
     ESP_ERROR_CHECK(module_mqtt_init());
     ESP_ERROR_CHECK(module_mqtt_set_safety_limits_handler(aice_apply_safety_limits_update, NULL));
+    ESP_ERROR_CHECK(module_mqtt_set_relay_command_handler(aice_queue_relay_command, NULL));
 
     bool credentials_in_nvs = module_nvs_credentials_exist();
     if (credentials_in_nvs) {
@@ -774,39 +841,26 @@ void app_main(void)
                 // If it was a short press (less than 4 seconds)
                 if (button_press_ticks > 0 && button_press_ticks < 40) {
                     if (critical_protection_active) {
-                        ade7953_measurement_t recovery_measurement = {0};
-                        ade7953_safety_decision_t recovery_decision = {0};
-                        esp_err_t recovery_ret = module_ade7953_read_measurement(&recovery_measurement, true, true);
-                        if (recovery_ret == ESP_OK) {
-                            module_ade7953_evaluate_safety(&recovery_measurement, &g_ade_policy.safety_limits, &recovery_decision);
-                            if (!recovery_decision.trip) {
-                                critical_protection_active = false;
-                                critical_protection_started_ms = 0;
-                                g_relay_on = true;
-                                module_relay_set(true);
-                                ESP_LOGI(TAG, "Button short press: critical protection cleared, relay closed");
-                                aice_refresh_network_state(credentials_in_nvs);
-                            } else {
-                                module_relay_set(false);
-                                g_relay_on = false;
-                                aice_set_status(STATUS_ERROR);
-                                ESP_LOGW(TAG, "Button short press ignored: protection condition still present");
-                            }
-                        } else {
-                            module_relay_set(false);
-                            g_relay_on = false;
-                            aice_set_status(STATUS_ERROR);
-                            ESP_LOGW(TAG, "Button short press could not verify recovery: %s", esp_err_to_name(recovery_ret));
-                        }
+                        aice_handle_relay_toggle_request("Button short press", credentials_in_nvs, &critical_protection_active, &critical_protection_started_ms);
                     } else {
-                        g_relay_on = !g_relay_on; // Toggle relay state
-                        module_relay_set(g_relay_on);
-                        ESP_LOGI(TAG, "Button short press: Relay toggled %s", g_relay_on ? "ON" : "OFF");
+                        aice_handle_relay_toggle_request("Button short press", credentials_in_nvs, &critical_protection_active, &critical_protection_started_ms);
                     }
                 }
                 button_was_pressed = false;
                 button_press_ticks = 0;
             }
+        }
+
+        bool gui_relay_toggle_requested = false;
+        portENTER_CRITICAL(&g_gui_relay_request_mux);
+        if (g_gui_relay_toggle_requested) {
+            gui_relay_toggle_requested = true;
+            g_gui_relay_toggle_requested = false;
+        }
+        portEXIT_CRITICAL(&g_gui_relay_request_mux);
+
+        if (gui_relay_toggle_requested) {
+            aice_handle_relay_toggle_request("GUI relay command", credentials_in_nvs, &critical_protection_active, &critical_protection_started_ms);
         }
 
         // -------------------------------------------------------------

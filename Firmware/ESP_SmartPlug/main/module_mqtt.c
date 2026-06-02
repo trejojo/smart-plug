@@ -15,6 +15,8 @@ static esp_mqtt_client_handle_t mqtt_client = NULL;
 static bool mqtt_connected = false;
 static module_mqtt_safety_limits_handler_t s_safety_limits_handler = NULL;
 static void *s_safety_limits_handler_user_data = NULL;
+static module_mqtt_relay_command_handler_t s_relay_command_handler = NULL;
+static void *s_relay_command_handler_user_data = NULL;
 
 static bool mqtt_topic_matches(const esp_mqtt_event_handle_t event, const char *topic)
 {
@@ -67,6 +69,28 @@ static void publish_waveform_request_ack(bool accepted, const char *reason)
 		ESP_LOGE(TAG, "Failed to publish waveform-request acknowledgment");
 	} else {
 		ESP_LOGI(TAG, "Published waveform-request acknowledgment: %s (msg_id: %d)", ack_payload, ack_msg_id);
+	}
+}
+
+static void publish_relay_command_ack(const char *action, bool accepted, const char *reason)
+{
+	char ack_payload[256];
+	snprintf(ack_payload, sizeof(ack_payload),
+	         "{"
+	         "\"event_type\":\"RELAY_COMMAND\"," 
+	         "\"action\":\"%s\"," 
+	         "\"accepted\":%s,"
+	         "\"reason\":\"%s\""
+	         "}",
+	         action != NULL ? action : "unknown",
+	         accepted ? "true" : "false",
+	         reason != NULL ? reason : "unknown");
+
+	int ack_msg_id = esp_mqtt_client_publish(mqtt_client, "aice/status", ack_payload, 0, 1, 0);
+	if (ack_msg_id == -1) {
+		ESP_LOGE(TAG, "Failed to publish relay-command acknowledgment");
+	} else {
+		ESP_LOGI(TAG, "Published relay-command acknowledgment: %s (msg_id: %d)", ack_payload, ack_msg_id);
 	}
 }
 
@@ -166,6 +190,25 @@ static void handle_safety_limits_command(const esp_mqtt_event_handle_t event)
 		return;
 	}
 
+	if (cJSON_IsString(action_item) && action_item->valuestring != NULL &&
+	    (strcmp(action_item->valuestring, "toggle_relay") == 0 ||
+	     strcmp(action_item->valuestring, "relay_toggle") == 0 ||
+	     strcmp(action_item->valuestring, "RELAY_TOGGLE") == 0)) {
+		esp_err_t relay_ret = ESP_ERR_INVALID_STATE;
+		if (s_relay_command_handler != NULL) {
+			relay_ret = s_relay_command_handler(action_item->valuestring, s_relay_command_handler_user_data);
+		}
+		if (relay_ret == ESP_OK) {
+			ESP_LOGI(TAG, "Relay command received from GUI: %s", action_item->valuestring);
+			publish_relay_command_ack(action_item->valuestring, true, "queued");
+		} else {
+			ESP_LOGW(TAG, "Relay command rejected: %s", esp_err_to_name(relay_ret));
+			publish_relay_command_ack(action_item->valuestring, false, esp_err_to_name(relay_ret));
+		}
+		cJSON_Delete(root);
+		return;
+	}
+
 	cJSON *max_vrms_item = cJSON_GetObjectItemCaseSensitive(root, "max_vrms");
 	cJSON *max_iarms_item = cJSON_GetObjectItemCaseSensitive(root, "max_iarms");
 	if (!cJSON_IsNumber(max_vrms_item) || !cJSON_IsNumber(max_iarms_item)) {
@@ -194,6 +237,13 @@ esp_err_t module_mqtt_set_safety_limits_handler(module_mqtt_safety_limits_handle
 {
 	s_safety_limits_handler = handler;
 	s_safety_limits_handler_user_data = user_data;
+	return ESP_OK;
+}
+
+esp_err_t module_mqtt_set_relay_command_handler(module_mqtt_relay_command_handler_t handler, void *user_data)
+{
+	s_relay_command_handler = handler;
+	s_relay_command_handler_user_data = user_data;
 	return ESP_OK;
 }
 

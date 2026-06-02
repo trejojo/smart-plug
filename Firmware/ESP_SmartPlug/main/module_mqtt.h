@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 typedef esp_err_t (*module_mqtt_safety_limits_handler_t)(float max_vrms, float max_iarms, void *user_data);
+typedef esp_err_t (*module_mqtt_relay_command_handler_t)(const char *action, void *user_data);
 
 /**
  * @brief Initialize MQTT module
@@ -17,6 +18,11 @@ esp_err_t module_mqtt_init(void);
  * @brief Register a handler for MQTT safety-limit commands on topic aice/cmd
  */
 esp_err_t module_mqtt_set_safety_limits_handler(module_mqtt_safety_limits_handler_t handler, void *user_data);
+
+/**
+ * @brief Register a handler for relay commands on topic aice/cmd
+ */
+esp_err_t module_mqtt_set_relay_command_handler(module_mqtt_relay_command_handler_t handler, void *user_data);
 
 /**
  * @brief Connect to MQTT broker
