@@ -1,21 +1,14 @@
 """
-AYCE Smart Plug Modular Dummy GUI
----------------------------------
+AYCE Smart Plug MQTT GUI
+--------------------------
 
-Modern dummy GUI prototype for the AYCE Smart Plug project.
+Production-oriented GUI for the AYCE Smart Plug project.
 
 Design goals:
-    - Keep data source modular: dummy today, MQTT tomorrow.
-    - Use the current firmware/MQTT topic contract as much as possible:
-        RX: smartplug/status, smartplug/events, smartplug/relay,
-            smartplug/temperature, smartplug/energy, aice/status
-        TX: smartplug/cmd with RELAY_ON / RELAY_OFF
-            aice/cmd with {"max_vrms": ..., "max_iarms": ...}
-    - Include a future waveform capture flow:
-        TX: smartplug/waveform/cmd
-        RX: smartplug/waveform
-    - Show waveform, harmonic spectrum and THD using dummy samples generated at
-      512 samples at 6.99 kHz from the ADE waveform reconstruction path.
+    - Use the PC Mosquitto broker and the ESP32 MQTT firmware as the live data source.
+    - Keep BLE provisioning available from the GUI using provisioning/provisioner.py.
+    - Use one standardized MQTT topic contract for telemetry, state, commands, ACKs and waveform captures.
+    - Show waveform, harmonic spectrum and THD from a 512-sample ADE7953 capture at 6.99 kHz.
 
 Important FFT normalization note:
     For a coherent sine sampled over an integer number of cycles, the DFT bin
@@ -33,7 +26,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import queue
+import sys
 import random
 import threading
 import time
@@ -44,32 +39,74 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+# Allow running this file directly from Software/telemetry while importing
+# Software/provisioning/provisioner.py.
+SOFTWARE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if SOFTWARE_DIR not in sys.path:
+    sys.path.insert(0, SOFTWARE_DIR)
+
+from mqtt_client import (
+    DEFAULT_BROKER,
+    DEFAULT_PORT,
+    DEFAULT_WAVEFORM_SAMPLE_COUNT,
+    DEFAULT_WAVEFORM_SAMPLE_RATE_HZ,
+    SmartPlugMqttClient,
+    TOPIC_COMMAND_ACK,
+    TOPIC_COMMAND_CONFIG,
+    TOPIC_COMMAND_RELAY,
+    TOPIC_EVENTS_PROTECTION,
+    TOPIC_STATE_RELAY,
+    TOPIC_TELEMETRY_ENERGY,
+    TOPIC_TELEMETRY_STATUS,
+    TOPIC_TELEMETRY_TEMPERATURE,
+    TOPIC_WAVEFORM_DATA,
+    TOPIC_WAVEFORM_REQUEST,
+    ACK_TOPICS,
+    ENERGY_TOPICS,
+    EVENT_TOPICS,
+    RELAY_STATE_TOPICS,
+    STATUS_TOPICS,
+    TEMPERATURE_TOPICS,
+    WAVEFORM_DATA_TOPICS,
+)
+from provisioning.provisioner import (
+    DEFAULT_MQTT_BROKER,
+    DEFAULT_MQTT_PORT,
+    DEFAULT_WIFI_PASSWORD,
+    DEFAULT_WIFI_SSID,
+    TARGET_MAC,
+    ProvisioningError,
+    send_credentials_sync,
+)
+
 
 # =============================================================================
 # Constants and theme
 # =============================================================================
 
-APP_TITLE = "AYCE Smart Plug Dashboard - Dummy Mode v10"
+APP_TITLE = "AYCE Smart Plug Dashboard"
 
 NOMINAL_VRMS = 127.0
 NOMINAL_FREQ_HZ = 60.0
 NOMINAL_CURRENT_ARMS = 5.0
-SAMPLE_RATE_HZ = 6990
-WAVEFORM_SAMPLE_COUNT = 512
+SAMPLE_RATE_HZ = DEFAULT_WAVEFORM_SAMPLE_RATE_HZ
+WAVEFORM_SAMPLE_COUNT = DEFAULT_WAVEFORM_SAMPLE_COUNT
 WAVEFORM_CAPTURE_SECONDS = WAVEFORM_SAMPLE_COUNT / SAMPLE_RATE_HZ
 MAX_PLOT_HARMONIC_ORDER = 20
 MAX_TABLE_HARMONIC_ORDER = int((SAMPLE_RATE_HZ / 2.0) // NOMINAL_FREQ_HZ)
 
-TOPIC_STATUS = "smartplug/status"
-TOPIC_EVENTS = "smartplug/events"
-TOPIC_RELAY = "smartplug/relay"
-TOPIC_TEMPERATURE = "smartplug/temperature"
-TOPIC_ENERGY = "smartplug/energy"
-TOPIC_SAFETY_ACK = "aice/status"
-TOPIC_RELAY_CMD = "smartplug/cmd"
-TOPIC_SAFETY_CMD = "aice/cmd"
-TOPIC_WAVEFORM_CMD = "smartplug/waveform/cmd"       # Proposed future topic
-TOPIC_WAVEFORM_DATA = "smartplug/waveform"          # Proposed future topic
+TOPIC_STATUS = TOPIC_TELEMETRY_STATUS
+TOPIC_EVENTS = TOPIC_EVENTS_PROTECTION
+TOPIC_RELAY = TOPIC_STATE_RELAY
+TOPIC_TEMPERATURE = TOPIC_TELEMETRY_TEMPERATURE
+TOPIC_ENERGY = TOPIC_TELEMETRY_ENERGY
+TOPIC_ACK = TOPIC_COMMAND_ACK
+TOPIC_SAFETY_ACK = TOPIC_COMMAND_ACK
+TOPIC_RELAY_CMD = TOPIC_COMMAND_RELAY
+TOPIC_SAFETY_CMD = TOPIC_COMMAND_CONFIG
+TOPIC_WAVEFORM_CMD = TOPIC_WAVEFORM_REQUEST
+SPECIAL_TOPIC_MQTT_CONNECTION = "__internal/mqtt_connection"
+SPECIAL_TOPIC_BLE_RESULT = "__internal/ble_result"
 
 PHASE_PROVISIONING = "provisioning"
 PHASE_DASHBOARD = "dashboard"
@@ -143,6 +180,9 @@ class SafetyLimitAck:
     max_iarms: float
     reason: str = ""
     timestamp: str = ""
+    event_type: str = ""
+    action: str = ""
+    command: str = ""
 
 
 @dataclass
@@ -173,6 +213,13 @@ def clamp(value: float, min_value: float, max_value: float) -> float:
 def safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
     except (TypeError, ValueError):
         return default
 
@@ -519,6 +566,97 @@ class DummySmartPlugDataSource:
 
 
 # =============================================================================
+# Live MQTT source
+# =============================================================================
+
+class MqttSmartPlugDataSource:
+    """Live data source used by the GUI.
+
+    The MQTT network loop runs in a Paho background thread. Every received MQTT
+    message is forwarded to the Tkinter-safe incoming_queue; the GUI consumes it
+    from the main thread in _process_incoming_queue().
+    """
+
+    def __init__(self, out_queue: "queue.Queue[Tuple[str, str]]", broker: str = DEFAULT_BROKER, port: int = DEFAULT_PORT):
+        self.out_queue = out_queue
+        self.broker = broker
+        self.port = int(port)
+        self.client: Optional[SmartPlugMqttClient] = None
+        self._lock = threading.Lock()
+
+    def _emit_internal(self, topic: str, payload: Dict[str, Any]) -> None:
+        self.out_queue.put((topic, json.dumps(payload)))
+
+    def _build_client(self) -> SmartPlugMqttClient:
+        client = SmartPlugMqttClient(
+            broker=self.broker,
+            port=self.port,
+            client_id="AYCE_SmartPlug_GUI",
+            console_print=False,
+        )
+        client.on_any_message = lambda parsed: self.out_queue.put((parsed.topic, parsed.payload_text))
+        client.on_connection_change = lambda connected, rc: self._emit_internal(
+            SPECIAL_TOPIC_MQTT_CONNECTION,
+            {"connected": bool(connected), "rc": int(rc), "broker": self.broker, "port": self.port},
+        )
+        return client
+
+    def start(self) -> None:
+        def worker() -> None:
+            try:
+                with self._lock:
+                    self.client = self._build_client()
+                    client = self.client
+                client.start()
+            except Exception as exc:
+                self._emit_internal(
+                    SPECIAL_TOPIC_MQTT_CONNECTION,
+                    {"connected": False, "rc": -1, "broker": self.broker, "port": self.port, "error": str(exc)},
+                )
+        threading.Thread(target=worker, daemon=True).start()
+
+    def stop(self) -> None:
+        with self._lock:
+            client = self.client
+            self.client = None
+        if client is not None:
+            try:
+                client.stop()
+            except Exception:
+                pass
+
+    def reconnect(self, broker: str, port: int = DEFAULT_PORT) -> None:
+        self.stop()
+        self.broker = broker
+        self.port = int(port)
+        self.start()
+
+    def _can_publish(self) -> bool:
+        return self.client is not None and self.client.is_connected
+
+    def publish_relay(self, turn_on: bool) -> bool:
+        if not self._can_publish():
+            return False
+        assert self.client is not None
+        self.client.publish_relay(turn_on)
+        return True
+
+    def publish_safety_limits(self, max_vrms: float, max_iarms: float) -> bool:
+        if not self._can_publish():
+            return False
+        assert self.client is not None
+        self.client.publish_safety_limits(max_vrms, max_iarms)
+        return True
+
+    def request_waveform_capture(self) -> bool:
+        if not self._can_publish():
+            return False
+        assert self.client is not None
+        self.client.publish_waveform_request(sample_count=WAVEFORM_SAMPLE_COUNT, sampling_rate_hz=SAMPLE_RATE_HZ)
+        return True
+
+
+# =============================================================================
 # Parser/router
 # =============================================================================
 
@@ -526,16 +664,16 @@ class MessageParser:
     @staticmethod
     def parse_telemetry(data: Dict[str, Any]) -> TelemetrySample:
         return TelemetrySample(
-            vrms=safe_float(data.get("vrms")),
-            irms=safe_float(data.get("irms")),
-            pf=safe_float(data.get("pf")),
-            active_power=safe_float(data.get("active_power")),
-            reactive_power=safe_float(data.get("reactive_power")),
-            frequency=safe_float(data.get("frequency"), NOMINAL_FREQ_HZ),
+            vrms=safe_float(data.get("vrms", data.get("voltage_vrms", data.get("voltage")))),
+            irms=safe_float(data.get("irms", data.get("current_arms", data.get("current")))),
+            pf=safe_float(data.get("pf", data.get("power_factor"))),
+            active_power=safe_float(data.get("active_power", data.get("power_w", data.get("power")))),
+            reactive_power=safe_float(data.get("reactive_power", data.get("reactive_power_var"))),
+            frequency=safe_float(data.get("frequency", data.get("frequency_hz")), NOMINAL_FREQ_HZ),
             no_load=bool_from_any(data.get("no_load")),
-            energy_wh=safe_float(data.get("energy_wh")),
+            energy_wh=safe_float(data.get("energy_wh", data.get("energy"))),
             relay=bool_from_any(data.get("relay")),
-            tmp_c=safe_float(data.get("tmp_c")),
+            tmp_c=safe_float(data.get("tmp_c", data.get("temperature_c"))),
             timestamp=str(data.get("timestamp", now_str())),
         )
 
@@ -557,16 +695,21 @@ class MessageParser:
             max_iarms=safe_float(data.get("max_iarms")),
             reason=str(data.get("reason", "")),
             timestamp=str(data.get("timestamp", now_str())),
+            event_type=str(data.get("event_type", "")),
+            action=str(data.get("action", "")),
+            command=str(data.get("command", "")),
         )
 
     @staticmethod
     def parse_waveform(data: Dict[str, Any]) -> WaveformPacket:
         signals = data.get("signals", {}) or {}
         analysis = data.get("analysis", {}) or {}
-        voltage_samples = [safe_float(x) for x in signals.get("voltage_v", [])]
-        current_samples = [safe_float(x) for x in signals.get("current_a", [])]
-        sampling_rate = int(safe_float(data.get("sampling_rate_hz"), SAMPLE_RATE_HZ))
-        fundamental = safe_float(analysis.get("fundamental_hz"), NOMINAL_FREQ_HZ)
+        voltage_raw = signals.get("voltage_v", data.get("voltage_samples", data.get("voltage_v", [])))
+        current_raw = signals.get("current_a", data.get("current_samples", data.get("current_a", [])))
+        voltage_samples = [safe_float(x) for x in voltage_raw]
+        current_samples = [safe_float(x) for x in current_raw]
+        sampling_rate = int(safe_float(data.get("sampling_rate_hz", data.get("fs_hz")), SAMPLE_RATE_HZ))
+        fundamental = safe_float(analysis.get("fundamental_hz", data.get("fundamental_hz")), NOMINAL_FREQ_HZ)
 
         # Recompute on the PC side from raw samples. This is deliberate: later the
         # ESP32 can send only samples and the GUI can still produce FFT/THD.
@@ -596,27 +739,31 @@ class MessageRouter:
             self.app.log(f"Invalid JSON on {topic}: {exc}", level="error")
             return
 
-        if topic == TOPIC_STATUS:
+        if topic == SPECIAL_TOPIC_MQTT_CONNECTION:
+            self.app.on_mqtt_connection_event(data)
+        elif topic == SPECIAL_TOPIC_BLE_RESULT:
+            self.app.on_ble_result(data)
+        elif topic in STATUS_TOPICS:
             self.app.on_telemetry(MessageParser.parse_telemetry(data))
-        elif topic == TOPIC_EVENTS:
+        elif topic in EVENT_TOPICS:
             event_type = data.get("event_type", "")
             if event_type == "CRITICAL_PROTECTION":
                 self.app.on_critical_event(MessageParser.parse_event(data))
             else:
                 self.app.log(f"Device event: {event_type}", level="info")
-        elif topic == TOPIC_RELAY:
+        elif topic in RELAY_STATE_TOPICS:
             relay = bool_from_any(data.get("relay"))
             accepted = bool_from_any(data.get("accepted", True))
             reason = str(data.get("reason", ""))
             self.app.on_relay_update(relay, accepted, reason)
-        elif topic == TOPIC_TEMPERATURE:
+        elif topic in TEMPERATURE_TOPICS:
             temp = safe_float(data.get("temperature_c", data.get("tmp_c")))
             self.app.on_temperature_update(temp)
-        elif topic == TOPIC_ENERGY:
+        elif topic in ENERGY_TOPICS:
             self.app.on_energy_packet(data)
-        elif topic == TOPIC_SAFETY_ACK:
-            self.app.on_safety_ack(MessageParser.parse_safety_ack(data))
-        elif topic == TOPIC_WAVEFORM_DATA:
+        elif topic in ACK_TOPICS:
+            self.app.on_command_ack(MessageParser.parse_safety_ack(data))
+        elif topic in WAVEFORM_DATA_TOPICS:
             self.app.on_waveform_packet(MessageParser.parse_waveform(data))
         else:
             self.app.log(f"Unhandled topic {topic}", level="rx")
@@ -672,27 +819,18 @@ class HeaderBar(tk.Frame):
         title_box.pack(side="left", fill="x", expand=True)
         tk.Label(title_box, text="AYCE Smart Plug", bg=Theme.BG, fg=Theme.TEXT,
                  font=("Segoe UI", 22, "bold")).pack(anchor="w")
-        tk.Label(title_box, text="Dummy GUI prototype · MQTT/BLE-ready architecture",
+        tk.Label(title_box, text="Live MQTT dashboard · BLE provisioning",
                  bg=Theme.BG, fg=Theme.MUTED, font=("Segoe UI", 10)).pack(anchor="w")
 
         right = tk.Frame(self, bg=Theme.BG)
         right.pack(side="right", anchor="ne")
-        self.connection_badge = tk.Label(right, text="MQTT: SIMULATED", bg=Theme.PANEL_2,
-                                         fg=Theme.ACCENT, font=("Segoe UI", 9, "bold"), padx=10, pady=5)
+        self.connection_badge = tk.Label(right, text="MQTT: DISCONNECTED", bg=Theme.PANEL_2,
+                                         fg=Theme.BAD, font=("Segoe UI", 9, "bold"), padx=10, pady=5)
         self.connection_badge.pack(anchor="e")
         self.phase_badge = tk.Label(right, text="PHASE: --", bg=Theme.PANEL_2, fg=Theme.MUTED,
                                     font=("Segoe UI", 8, "bold"), padx=10, pady=4)
         self.phase_badge.pack(anchor="e", pady=(5, 0))
 
-        # Always visible in dummy mode. These are intentionally small so they do
-        # not dominate the production-like UI.
-        dev = tk.Frame(right, bg=Theme.BG)
-        dev.pack(anchor="e", pady=(6, 0))
-        self._dev_btn(dev, "BLE", lambda: app.set_phase(PHASE_PROVISIONING))
-        self._dev_btn(dev, "Dashboard", lambda: app.set_phase(PHASE_DASHBOARD))
-        self._dev_btn(dev, "MQTT lost", lambda: app.set_phase(PHASE_RECONNECTING))
-        self._dev_btn(dev, "OV trip", lambda: app.data_source.emit_critical_event("OVERVOLTAGE"))
-        self._dev_btn(dev, "OC trip", lambda: app.data_source.emit_critical_event("OVERCURRENT"))
 
     def _dev_btn(self, parent: tk.Widget, text: str, command: Callable[[], None]) -> None:
         tk.Button(parent, text=text, bg=Theme.PANEL_2, fg=Theme.MUTED, activebackground=Theme.CARD_HOVER,
@@ -707,9 +845,9 @@ class HeaderBar(tk.Frame):
         }.get(phase, f"PHASE: {phase.upper()}")
         self.phase_badge.configure(text=readable)
         if phase == PHASE_DASHBOARD:
-            self.connection_badge.configure(text="MQTT: CONNECTED (SIM)", fg=Theme.GOOD)
+            self.connection_badge.configure(text="MQTT: CONNECTED", fg=Theme.GOOD)
         elif phase == PHASE_RECONNECTING:
-            self.connection_badge.configure(text="MQTT: RECONNECTING (SIM)", fg=Theme.WARN)
+            self.connection_badge.configure(text="MQTT: WAITING FOR DEVICE", fg=Theme.WARN)
         else:
             self.connection_badge.configure(text="MQTT: NOT CONNECTED", fg=Theme.BAD)
 
@@ -742,22 +880,24 @@ class ProvisioningFrame(tk.Frame):
 
         form = tk.Frame(left, bg=Theme.PANEL)
         form.pack(fill="x")
-        self.ssid_var = tk.StringVar(value="AYCE_HS")
-        self.pass_var = tk.StringVar(value="Bake_This")
-        self.broker_var = tk.StringVar(value="192.168.137.1")
-        self.mac_var = tk.StringVar(value="D8:3B:DA:8A:2B:A6")
+        self.ssid_var = tk.StringVar(value=DEFAULT_WIFI_SSID)
+        self.pass_var = tk.StringVar(value=DEFAULT_WIFI_PASSWORD)
+        self.broker_var = tk.StringVar(value=DEFAULT_MQTT_BROKER)
+        self.port_var = tk.StringVar(value=str(DEFAULT_MQTT_PORT))
+        self.mac_var = tk.StringVar(value=TARGET_MAC)
 
         self._form_row(form, "WiFi SSID", self.ssid_var, 0)
         self._form_row(form, "WiFi Password", self.pass_var, 1, show="*")
         self._form_row(form, "MQTT Broker IP", self.broker_var, 2)
-        self._form_row(form, "ESP32 BLE MAC", self.mac_var, 3)
+        self._form_row(form, "MQTT Port", self.port_var, 3)
+        self._form_row(form, "ESP32 BLE MAC", self.mac_var, 4)
 
         btns = tk.Frame(left, bg=Theme.PANEL)
         btns.pack(fill="x", pady=(18, 0))
-        tk.Button(btns, text="Send credentials over BLE (simulated)",
+        tk.Button(btns, text="Send credentials over BLE",
                   bg=Theme.ACCENT, fg=Theme.BLACK, activebackground=Theme.ACCENT_2,
                   relief="flat", font=("Segoe UI", 10, "bold"), padx=12, pady=8,
-                  command=self._send_ble_dummy).pack(side="left")
+                  command=self._send_ble_credentials).pack(side="left")
         tk.Button(btns, text="View MQTT setup instructions", bg=Theme.PANEL_2, fg=Theme.TEXT,
                   activebackground=Theme.CARD_HOVER, relief="flat", padx=12, pady=8,
                   command=self._open_mqtt_instructions).pack(side="left", padx=(10, 0))
@@ -770,7 +910,7 @@ class ProvisioningFrame(tk.Frame):
             "3. The GUI sends SSID, password and broker information to the device.\n"
             "4. The ESP32 restarts WiFi and stops using BLE.\n"
             "5. Once MQTT connects, the GUI switches to the main dashboard.\n\n"
-            "In this dummy version, use the small test buttons in the upper-right corner."
+            "Keep this window open until the first smartplug/telemetry/status packet is received."
         )
         tk.Label(right, text=instructions, bg=Theme.PANEL, fg=Theme.MUTED,
                  font=("Segoe UI", 11), justify="left", wraplength=520).pack(anchor="w", pady=(10, 18))
@@ -779,7 +919,7 @@ class ProvisioningFrame(tk.Frame):
         self.progress.pack(fill="x", pady=(6, 16))
         self.progress.start(14)
 
-        self.small_note = tk.Label(right, text="Status: waiting for user action or simulated MQTT reconnection.",
+        self.small_note = tk.Label(right, text="Status: waiting for user action or MQTT reconnection.",
                                    bg=Theme.PANEL, fg=Theme.ACCENT, font=("Segoe UI", 10, "bold"),
                                    wraplength=520, justify="left")
         self.small_note.pack(anchor="w")
@@ -793,15 +933,20 @@ class ProvisioningFrame(tk.Frame):
         entry.grid(row=row, column=1, sticky="ew", padx=(12, 0), pady=7, ipady=7)
         parent.grid_columnconfigure(1, weight=1)
 
-    def _send_ble_dummy(self) -> None:
+    def _send_ble_credentials(self) -> None:
         self.credentials_sent = True
         self.status_label.configure(
-            text="Credentials sent over BLE in simulated mode. The Smart Plug should restart and attempt to connect to the MQTT broker.",
-            fg=Theme.ACCENT,
+            text="Sending credentials over BLE. Keep the ESP32 powered and advertising.",
+            fg=Theme.WARN,
         )
-        self.small_note.configure(text="Status: credentials sent. Waiting for simulated MQTT connection…")
-        self.app.log(f"BLE provisioning dummy: ssid={self.ssid_var.get()} broker={self.broker_var.get()}", level="tx")
-        self.app.set_phase(PHASE_RECONNECTING)
+        self.small_note.configure(text="Status: scanning BLE and writing provisioning JSON…")
+        self.app.send_ble_credentials(
+            ssid=self.ssid_var.get().strip(),
+            password=self.pass_var.get(),
+            broker_ip=self.broker_var.get().strip(),
+            broker_port=safe_int(self.port_var.get(), DEFAULT_MQTT_PORT),
+            mac=self.mac_var.get().strip(),
+        )
 
     def _open_mqtt_instructions(self) -> None:
         win = tk.Toplevel(self)
@@ -814,7 +959,7 @@ class ProvisioningFrame(tk.Frame):
                        relief="flat", wrap="word", font=("Consolas", 10), padx=14, pady=14)
         text.pack(expand=True, fill="both", padx=20, pady=(0, 20))
         instructions = """
-Preliminary guide for PC / local broker
+PC / local broker guide
 
 1) Install Python dependencies:
    pip install bleak==0.21.1 paho-mqtt==1.6.1
@@ -829,13 +974,17 @@ Preliminary guide for PC / local broker
    En muchos hotspots de Windows puede usarse una IP como 192.168.137.1.
 
 5) Expected flow:
-   GUI -> BLE -> ESP32: WiFi / broker credentials
-   ESP32: restarts WiFi, stops BLE and connects MQTT
-   ESP32 -> MQTT -> GUI: smartplug/status
+   GUI -> BLE -> ESP32: WiFi credentials
+   ESP32: restarts WiFi and connects to the MQTT broker
+   ESP32 -> MQTT -> GUI: smartplug/telemetry/status
 
-Note:
-These instructions are preliminary. Later, the setup should include OS-specific steps
-and troubleshooting for firewall, port 1883 and network issues.
+6) Standard MQTT topics:
+   Telemetry: smartplug/telemetry/status
+   Relay command: smartplug/commands/relay
+   Safety config: smartplug/commands/config
+   Waveform request/data: smartplug/waveform/request, smartplug/waveform/data
+
+Troubleshooting: check Windows firewall, broker IP, hotspot IP and port 1883.
 """.strip()
         text.insert("1.0", instructions)
         text.configure(state="disabled")
@@ -930,14 +1079,14 @@ class DashboardFrame(tk.Frame):
 
         self.power_triangle.update_triangle(sample)
         self.relay_panel.update_relay(sample.relay)
-        self.status_panel.set_telemetry_state("Receiving smartplug/status", Theme.GOOD)
+        self.status_panel.set_telemetry_state("Receiving smartplug/telemetry/status", Theme.GOOD)
 
     def set_collecting(self, collecting: bool, duration_s: float = 0.0) -> None:
         self.waveform_panel.set_collecting(collecting, duration_s)
         if collecting:
             self.status_panel.set_telemetry_state("Base telemetry paused for 512-sample waveform capture", Theme.WARN)
         else:
-            self.status_panel.set_telemetry_state("Receiving smartplug/status", Theme.GOOD)
+            self.status_panel.set_telemetry_state("Receiving smartplug/telemetry/status", Theme.GOOD)
 
 
 class RelayControlPanel(tk.Frame):
@@ -1642,7 +1791,7 @@ class SmartPlugApp:
 
         self.incoming_queue: "queue.Queue[Tuple[str, str]]" = queue.Queue()
         self.router = MessageRouter(self)
-        self.data_source = DummySmartPlugDataSource(self.incoming_queue)
+        self.data_source = MqttSmartPlugDataSource(self.incoming_queue, broker=DEFAULT_BROKER, port=DEFAULT_PORT)
         self.phase = PHASE_PROVISIONING
         self.latest_telemetry = TelemetrySample()
         self.collecting_waveform = False
@@ -1659,7 +1808,7 @@ class SmartPlugApp:
         self.set_phase(PHASE_PROVISIONING)
         self.data_source.start()
         self.root.after(100, self._process_incoming_queue)
-        self.log("Dummy GUI initialized. Use top-right test controls to switch phases.", level="success")
+        self.log(f"GUI initialized. Connecting to MQTT broker {DEFAULT_BROKER}:{DEFAULT_PORT}.", level="success")
 
     def _setup_ttk_style(self) -> None:
         style = ttk.Style()
@@ -1685,14 +1834,14 @@ class SmartPlugApp:
         self.dashboard_frame.pack_forget()
         if phase == PHASE_DASHBOARD:
             self.dashboard_frame.pack(expand=True, fill="both")
-            self.log("Dashboard phase active. Telemetry source is dummy smartplug/status.", level="success")
+            self.log("Dashboard phase active. Receiving live MQTT telemetry.", level="success")
         elif phase == PHASE_RECONNECTING:
             self.provisioning_frame.pack(expand=True, fill="both")
             self.provisioning_frame.status_label.configure(
                 text="MQTT is disconnected or not responding yet. If credentials were already sent, wait here while the Smart Plug finishes restarting and reconnecting to the broker.",
                 fg=Theme.WARN,
             )
-            self.provisioning_frame.small_note.configure(text="Status: waiting for MQTT reconnection. The GUI will return to the dashboard when smartplug/status is received.")
+            self.provisioning_frame.small_note.configure(text="Status: waiting for MQTT reconnection. The GUI will return to the dashboard when smartplug/telemetry/status is received.")
             self.log("Waiting for MQTT reconnection.", level="warning")
         else:
             self.provisioning_frame.pack(expand=True, fill="both")
@@ -1700,7 +1849,7 @@ class SmartPlugApp:
                 text="No MQTT connection detected. You can send credentials over BLE or wait for reconnection.",
                 fg=Theme.MUTED,
             )
-            self.provisioning_frame.small_note.configure(text="Status: waiting for user action or simulated MQTT reconnection.")
+            self.provisioning_frame.small_note.configure(text="Status: waiting for user action or MQTT device telemetry.")
             self.log("BLE provisioning phase active.", level="info")
 
     def _process_incoming_queue(self) -> None:
@@ -1718,7 +1867,7 @@ class SmartPlugApp:
     # Incoming handlers --------------------------------------------------------
     def on_telemetry(self, sample: TelemetrySample) -> None:
         self.latest_telemetry = sample
-        if self.phase == PHASE_RECONNECTING:
+        if self.phase in (PHASE_RECONNECTING, PHASE_PROVISIONING):
             self.set_phase(PHASE_DASHBOARD)
         if self.phase == PHASE_DASHBOARD:
             self.dashboard_frame.update_telemetry(sample)
@@ -1741,15 +1890,88 @@ class SmartPlugApp:
         self.log(f"Temperature packet received: {temperature_c:.1f} °C", level="rx")
 
     def on_energy_packet(self, data: Dict[str, Any]) -> None:
-        energy_wh = safe_float(data.get("energy_wh"))
-        active_power = safe_float(data.get("active_power"))
+        energy_wh = safe_float(data.get("energy_wh", data.get("energy")))
+        active_power = safe_float(data.get("active_power", data.get("power")))
         self.log(f"Energy update: {energy_wh:.3f} Wh · P={active_power:.1f} W", level="rx")
 
-    def on_safety_ack(self, ack: SafetyLimitAck) -> None:
-        self.dashboard_frame.safety_panel.update_ack(ack)
-        self.dashboard_frame.status_panel.set_ack(ack)
+    def on_command_ack(self, ack: SafetyLimitAck) -> None:
         level = "success" if ack.accepted else "warning"
-        self.log(f"Safety ACK: {ack.reason}", level=level)
+        event_type = ack.event_type or ack.command or ack.action or "COMMAND_ACK"
+
+        if event_type == "SAFETY_LIMITS_UPDATE" or ack.max_vrms > 0 or ack.max_iarms > 0:
+            self.dashboard_frame.safety_panel.update_ack(ack)
+            self.dashboard_frame.status_panel.set_ack(ack)
+            self.log(f"Safety ACK: {ack.reason}", level=level)
+        elif event_type == "WAVEFORM_REQUEST":
+            if not ack.accepted:
+                self.collecting_waveform = False
+                self.dashboard_frame.set_collecting(False)
+                self.dashboard_frame.status_panel.set_waveform(f"Waveform rejected: {ack.reason}", Theme.BAD)
+            self.log(f"Waveform ACK: {ack.reason}", level=level)
+        elif event_type == "RELAY_COMMAND":
+            self.log(f"Relay command ACK: {ack.reason}", level=level)
+        else:
+            self.log(f"Command ACK {event_type}: {ack.reason}", level=level)
+
+    def on_safety_ack(self, ack: SafetyLimitAck) -> None:
+        self.on_command_ack(ack)
+
+    def on_mqtt_connection_event(self, data: Dict[str, Any]) -> None:
+        connected = bool_from_any(data.get("connected"))
+        broker = data.get("broker", DEFAULT_BROKER)
+        port = data.get("port", DEFAULT_PORT)
+        if connected:
+            self.header.connection_badge.configure(text=f"MQTT: CONNECTED {broker}:{port}", fg=Theme.GOOD)
+            self.provisioning_frame.small_note.configure(text="Status: broker connected. Waiting for device telemetry…")
+            if self.phase == PHASE_PROVISIONING:
+                self.set_phase(PHASE_RECONNECTING)
+            self.log(f"Connected to MQTT broker {broker}:{port}. Waiting for Smart Plug telemetry.", level="success")
+        else:
+            error = data.get("error", "")
+            self.header.connection_badge.configure(text="MQTT: DISCONNECTED", fg=Theme.BAD)
+            self.provisioning_frame.small_note.configure(text=f"Status: MQTT disconnected. {error}".strip())
+            if self.phase == PHASE_DASHBOARD:
+                self.set_phase(PHASE_RECONNECTING)
+            self.log(f"MQTT disconnected from {broker}:{port}. {error}", level="warning")
+
+    def on_ble_result(self, data: Dict[str, Any]) -> None:
+        ok = bool_from_any(data.get("ok"))
+        if ok:
+            broker = str(data.get("broker_ip", DEFAULT_BROKER))
+            port = safe_int(data.get("broker_port", DEFAULT_PORT), DEFAULT_PORT)
+            self.provisioning_frame.status_label.configure(
+                text="Credentials sent over BLE. Waiting for the ESP32 to reconnect through WiFi/MQTT.",
+                fg=Theme.ACCENT,
+            )
+            self.provisioning_frame.small_note.configure(text=f"Status: reconnecting GUI MQTT client to {broker}:{port}…")
+            self.data_source.reconnect(broker, port)
+            self.set_phase(PHASE_RECONNECTING)
+            self.log(f"BLE provisioning completed. Reconnecting MQTT client to {broker}:{port}.", level="success")
+        else:
+            err = str(data.get("error", "unknown BLE provisioning error"))
+            self.provisioning_frame.status_label.configure(text=f"BLE provisioning failed: {err}", fg=Theme.BAD)
+            self.provisioning_frame.small_note.configure(text="Status: verify ESP32 BLE advertising, MAC address and Windows Bluetooth permissions.")
+            self.log(f"BLE provisioning failed: {err}", level="error")
+
+    def send_ble_credentials(self, ssid: str, password: str, broker_ip: str, broker_port: int, mac: str) -> None:
+        def worker() -> None:
+            try:
+                result = send_credentials_sync(
+                    ssid=ssid,
+                    password=password,
+                    target_mac=mac,
+                    broker_ip=broker_ip,
+                    broker_port=broker_port,
+                    include_mqtt_fields=False,
+                )
+                result.update({"ok": True})
+                self.incoming_queue.put((SPECIAL_TOPIC_BLE_RESULT, json.dumps(result)))
+            except ProvisioningError as exc:
+                self.incoming_queue.put((SPECIAL_TOPIC_BLE_RESULT, json.dumps({"ok": False, "error": str(exc)})))
+            except Exception as exc:
+                self.incoming_queue.put((SPECIAL_TOPIC_BLE_RESULT, json.dumps({"ok": False, "error": str(exc)})))
+        threading.Thread(target=worker, daemon=True).start()
+        self.log(f"BLE provisioning started: ssid={ssid} broker={broker_ip}:{broker_port} mac={mac}", level="tx")
 
     def on_waveform_packet(self, packet: WaveformPacket) -> None:
         self.collecting_waveform = False
@@ -1763,42 +1985,43 @@ class SmartPlugApp:
 
     # Outgoing commands --------------------------------------------------------
     def publish_relay_command(self, turn_on: bool) -> None:
-        payload = "RELAY_ON" if turn_on else "RELAY_OFF"
-        self._publish_to_device(TOPIC_RELAY_CMD, payload)
-        self.data_source.set_relay(turn_on)
+        payload = json.dumps({"command": "RELAY_ON" if turn_on else "RELAY_OFF", "relay": bool(turn_on), "source": "GUI", "timestamp": now_str()})
+        self._publish_to_device(TOPIC_RELAY_CMD, payload, lambda: self.data_source.publish_relay(turn_on))
 
     def publish_safety_limits(self, max_vrms: float, max_iarms: float) -> None:
-        payload = json.dumps({"max_vrms": max_vrms, "max_iarms": max_iarms})
-        self._publish_to_device(TOPIC_SAFETY_CMD, payload)
-        self.data_source.set_safety_limits(max_vrms, max_iarms)
+        payload = json.dumps({"command": "SET_SAFETY_LIMITS", "max_vrms": max_vrms, "max_iarms": max_iarms, "source": "GUI", "timestamp": now_str()})
+        self._publish_to_device(TOPIC_SAFETY_CMD, payload, lambda: self.data_source.publish_safety_limits(max_vrms, max_iarms))
 
     def publish_waveform_request(self) -> None:
         if self.collecting_waveform:
             self.log("Waveform request ignored: capture already in progress.", level="warning")
             return
-        payload = json.dumps({"command_type": "REQUEST_WAVEFORM", "sample_count": WAVEFORM_SAMPLE_COUNT, "source": "GUI", "timestamp": now_str()})
-        self._publish_to_device(TOPIC_WAVEFORM_CMD, payload)
-        self.collecting_waveform = True
-        self.dashboard_frame.set_collecting(True, WAVEFORM_CAPTURE_SECONDS)
-        self.dashboard_frame.status_panel.set_waveform("Collecting 512 samples at 6.99 kHz…", Theme.WARN)
-        self.data_source.request_waveform_capture()
+        payload = json.dumps({"command": "REQUEST_WAVEFORM", "sample_count": WAVEFORM_SAMPLE_COUNT, "sampling_rate_hz": SAMPLE_RATE_HZ, "source": "GUI", "timestamp": now_str()})
+        ok = self._publish_to_device(TOPIC_WAVEFORM_CMD, payload, self.data_source.request_waveform_capture)
+        if ok:
+            self.collecting_waveform = True
+            self.dashboard_frame.set_collecting(True, WAVEFORM_CAPTURE_SECONDS)
+            self.dashboard_frame.status_panel.set_waveform("Collecting 512 samples at 6.99 kHz…", Theme.WARN)
 
-    def _publish_to_device(self, topic: str, payload: str) -> None:
-        # Future MQTT integration point.
+    def _publish_to_device(self, topic: str, payload: str, publish_fn: Callable[[], bool]) -> bool:
+        try:
+            ok = publish_fn()
+        except Exception as exc:
+            self.log(f"TX failed on {topic}: {exc}", level="error")
+            ok = False
+
         if hasattr(self, "dashboard_frame"):
             try:
-                if topic == TOPIC_RELAY_CMD:
-                    display_payload = payload
-                elif topic == TOPIC_SAFETY_CMD:
-                    display_payload = payload.replace('"', '')
-                elif topic == TOPIC_WAVEFORM_CMD:
-                    display_payload = "request 512-sample waveform"
-                else:
-                    display_payload = payload
+                display_payload = "request 512-sample waveform" if topic == TOPIC_WAVEFORM_CMD else payload
                 self.dashboard_frame.status_panel.set_command(f"{topic} → {display_payload}")
             except Exception:
                 pass
-        self.log(f"TX {topic}: {payload}", level="tx")
+
+        if ok:
+            self.log(f"TX {topic}: {payload}", level="tx")
+        else:
+            self.log(f"TX not sent; MQTT is not connected: {topic}", level="error")
+        return ok
 
     def log(self, message: str, level: str = "info") -> None:
         # Keep terminal trace for development, but GUI shows only clean status labels.

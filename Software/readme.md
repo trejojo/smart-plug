@@ -1,191 +1,113 @@
 # PC Software & Provisioning Setup
 
-This guide explains how to set up your local PC environment to communicate with the SmartPlug via Bluetooth Low Energy (BLE) and handle telemetry data.
+This package contains the PC-side tools for the AYCE Smart Plug:
 
----
+- `telemetry/smartplug_gui.py`: live MQTT GUI.
+- `telemetry/mqtt_client.py`: reusable MQTT client and console tool.
+- `telemetry/start_mosquitto.bat`: starts the local Mosquitto broker.
+- `provisioning/provisioner.py`: BLE provisioning helper, also imported by the GUI.
+- `firmware_patch/module_mqtt.c`: ESP32 firmware-side MQTT patch with standardized topics.
 
-## 1. Local Environment Setup
+## 1. Create and activate the Python environment
 
-Before running the scripts, you must create an isolated Python environment to avoid library conflicts.
-
-### A. Create the Virtual Environment
-
-Open your terminal in the `Software` directory and run:
+Open a terminal in the `Software` directory:
 
 ```powershell
 python -m venv .venv_pc
-```
-
-### B. Activate the Environment
-
-#### PowerShell
-
-```powershell
 .\.venv_pc\Scripts\Activate.ps1
-```
-
-#### Command Prompt (CMD)
-
-```cmd
-.\.venv_pc\Scripts\activate.bat
-```
-
-### C. Install Dependencies
-
-Once the environment is active (you should see `(.venv_pc)` in your terminal), install the required libraries:
-
-```powershell
 pip install -r requirements.txt
 ```
 
----
+For CMD:
 
-## 2. VS Code Configuration
-
-To ensure VS Code uses the correct libraries and provides proper IntelliSense, follow these steps:
-
-### How to Set `.venv_pc` as Active in VS Code
-
-1. Open the Command Palette with:
-
-   ```text
-   Ctrl + Shift + P
-   ```
-
-2. Run:
-
-   ```text
-   Python: Select Interpreter
-   ```
-
-3. Select the interpreter that points to your local virtual environment:
-
-   ```text
-   .venv_pc\Scripts\python.exe
-   ```
-
-4. Reload the VS Code window by opening the Command Palette again and running:
-
-   ```text
-   Developer: Reload Window
-   ```
-
-> After reloading, verify that the bottom-right status bar in VS Code shows `(.venv_pc)`.
-
----
-
-## 3. Usage: Provisioning the Device
-
-### Prerequisites
-
-- Ensure your PC Bluetooth is turned ON
-- Enable your Hotspot (set to 2.4 GHz band)
-- Ensure the ESP32 is powered and in BLE Advertising mode
-
-### Run Provisioning Script
-
-```powershell
-python provisioning/provisioner.py
+```cmd
+python -m venv .venv_pc
+.\.venv_pc\Scripts\activate.bat
+pip install -r requirements.txt
 ```
 
-### At this point "Provisioner.py" should...
+## 2. Start Mosquitto
 
-1. Scan for a nearby SmartPlug device (15-second timeout)
-2. Connect via BLE
-3. Verify the provisioning service UUID
-4. Send Wi-Fi credentials as a JSON payload
+Open a terminal in `Software\telemetry`:
 
-### Troubleshooting
-
-- **SmartPlug not found:** Check if the ESP32 is powered and advertising BLE.
-
-- **Connection timeout:** The device may have disconnected. Try again.
-
-- **Service UUID not found:** Firmware and client UUID definitions may be mismatched.
-
----
-
-## 4. MQTT Broker & Telemetry Setup
-
-After the ESP32 is provisioned and connected to Wi-Fi, it can send telemetry data via MQTT to your PC.
-
-### A. Install Mosquitto MQTT Broker (Windows)
-
-1. Download Mosquitto from: https://mosquitto.org/download/
-2. Run the installer (choose default options)
-3. During installation, Mosquitto will be registered as a Windows Service
-
-### B. Configure Mosquitto
-
-1. Locate the configuration file:
-   - Default path: `C:\Program Files\mosquitto\mosquitto.conf`
-
-2. Replace its contents with the configuration from `mosquitto.conf` in this repository, or manually add:
-
-   ```conf
-   listener 1883
-   allow_anonymous true
-   ```
-
-3. Save the file
-
-### C. Start the MQTT Broker
-
-**Option 1: Using Windows Services (Recommended)**
-- Open `Services.msc`
-- Find "Mosquitto Broker"
-- Click "Start" (or set to auto-start)
-
-**Option 2: Command Line**
-```powershell
-mosquitto -c "C:\Program Files\mosquitto\mosquitto.conf"
+```cmd
+start_mosquitto.bat
 ```
 
-**Verify it's running:**
-```powershell
-netstat -an | findstr 1883
-```
-You should see a line with `LISTENING` on port 1883.
+The broker listens on port `1883` and accepts anonymous local development connections.
 
-### D. Run the MQTT Telemetry Client
+## 3. Run the GUI
 
-Once the broker is running and the ESP32 is connected to Wi-Fi, start the telemetry listener:
+Open another terminal in `Software\telemetry` with the same virtual environment active:
 
-```powershell
-python telemetry/mqtt_client.py
+```cmd
+python smartplug_gui.py
 ```
 
-### What the Client Does
-
-- Connects to the local MQTT broker (127.0.0.1:1883)
-- Subscribes to all SmartPlug topics (smartplug/*)
-- Displays received messages with timestamps
-- Pretty-prints JSON payloads for readability
-
-### Troubleshooting
-
-- **Connection refused:** Broker is not running. Start Mosquitto first.
-- **No messages received:** Check that the ESP32 is connected to Wi-Fi (check IP in ESP32 logs)
-- **Port 1883 in use:** Another application is using the port. Change the port in mosquitto.conf and mqtt_client.py
-
----
-
-## Configuration Reference
-
-### Service UUID (Provisioning)
+The GUI can send BLE provisioning credentials using the values already used in the provisioning script:
 
 ```text
-f0debc9a-7856-3412-7856-341278563412
+SSID: AICE_HS
+Password: Bake_This
+Broker: 192.168.137.1
+Port: 1883
+BLE MAC: E0:72:A1:CE:A3:8A
 ```
 
-### Characteristic UUID (JSON Credentials)
+The BLE payload remains compatible with the working firmware provisioning flow: by default it sends only `ssid` and `password`. The broker IP/port are used by the PC GUI to connect to Mosquitto.
+
+## 4. Update the ESP32 firmware
+
+Copy:
 
 ```text
-f1debc9a-7856-3412-7856-341278563412
+firmware_patch\module_mqtt.c
 ```
 
-### Device Name
+into the ESP32 project location where `module_mqtt.c` currently lives. Then rebuild and flash the ESP32.
+
+The standardized MQTT topics are:
 
 ```text
-SmartPlug
+ESP32 -> PC
+smartplug/telemetry/status
+smartplug/telemetry/temperature
+smartplug/telemetry/energy
+smartplug/events/protection
+smartplug/state/relay
+smartplug/state/led
+smartplug/commands/ack
+smartplug/waveform/data
+
+PC -> ESP32
+smartplug/commands/relay
+smartplug/commands/config
+smartplug/waveform/request
+```
+
+## 5. Recommended test sequence
+
+1. Start Mosquitto using `telemetry\start_mosquitto.bat`.
+2. Run `telemetry\smartplug_gui.py`.
+3. Energize the ESP32 Smart Plug.
+4. If needed, use the GUI BLE provisioning screen and send credentials.
+5. Wait for `smartplug/telemetry/status`; the GUI will switch to the dashboard.
+6. Test relay ON/OFF.
+7. Test safety limits.
+8. Request waveform; the GUI should plot 512 samples and update FFT/THD.
+
+## 6. Optional console testing
+
+```cmd
+cd telemetry
+python mqtt_client.py --broker 192.168.137.1 --port 1883
+```
+
+Then use:
+
+```text
+relay on
+relay off
+set 135.0 5.0
+wave
 ```

@@ -2,31 +2,28 @@
 SmartPlug MQTT Client
 =====================
 
-PC-side MQTT layer for the SmartPlug GUI/console.
+Reusable PC-side MQTT layer for the AYCE Smart Plug GUI and console tools.
 
-This version is aligned with the current ESP32 firmware implementation in
-`module_mqtt.c`:
+Standard topic contract
+-----------------------
 
-ESP32 -> PC topics:
-    smartplug/status       Combined live telemetry package
-    smartplug/events       Critical protection events
-    smartplug/relay        Relay state updates
-    smartplug/led          RGB LED state updates
-    smartplug/temperature  Temperature-only updates
-    smartplug/energy       Energy-only updates
-    aice/status            Safety-limit update acknowledgments
+ESP32 -> PC:
+    smartplug/telemetry/status        Main combined telemetry JSON
+    smartplug/telemetry/temperature   Temperature-only JSON
+    smartplug/telemetry/energy        Energy-only/basic electrical JSON
+    smartplug/events/protection       Critical protection events JSON
+    smartplug/state/relay             Relay state JSON
+    smartplug/state/led               RGB LED state JSON
+    smartplug/commands/ack            ACKs for relay/config/waveform commands JSON
+    smartplug/waveform/data           512-sample waveform capture JSON
 
-PC -> ESP32 topics:
-    smartplug/cmd          Plain-text relay commands: RELAY_ON / RELAY_OFF
-    aice/cmd               JSON safety limits: {"max_vrms": ..., "max_iarms": ...}
+PC -> ESP32:
+    smartplug/commands/relay          Relay command JSON
+    smartplug/commands/config         Safety/config command JSON
+    smartplug/waveform/request        512-sample waveform request JSON
 
-The module can be used in two ways:
-    1. Imported by a future GUI as a reusable client class.
-    2. Run directly as a console tool for testing.
-
-Important unit convention:
-    - vrms / max_vrms are V RMS.
-    - irms / max_iarms / current_a_arms / current_b_arms are A RMS.
+The parser also accepts the older development topics used before the topic
+standardization so the PC tools remain useful during firmware transition.
 """
 
 from __future__ import annotations
@@ -42,50 +39,88 @@ from typing import Any, Callable, Dict, Optional
 
 try:
     import paho.mqtt.client as mqtt
-except ModuleNotFoundError:  # Allows parser/data models to be imported without paho installed.
+except ModuleNotFoundError:  # Allows models/parsers to be imported without paho installed.
     mqtt = None
 
 
-
 # -----------------------------------------------------------------------------
-# MQTT topic contract currently implemented by module_mqtt.c
+# MQTT topic contract
 # -----------------------------------------------------------------------------
 
-SMARTPLUG_STATUS_TOPIC = "smartplug/status"
-SMARTPLUG_EVENTS_TOPIC = "smartplug/events"
-SMARTPLUG_RELAY_TOPIC = "smartplug/relay"
-SMARTPLUG_LED_TOPIC = "smartplug/led"
-SMARTPLUG_TEMPERATURE_TOPIC = "smartplug/temperature"
-SMARTPLUG_ENERGY_TOPIC = "smartplug/energy"
-SMARTPLUG_CMD_TOPIC = "smartplug/cmd"
+SMARTPLUG_BASE = "smartplug"
 
-AICE_CMD_TOPIC = "aice/cmd"
-AICE_STATUS_TOPIC = "aice/status"
+TOPIC_TELEMETRY_STATUS = f"{SMARTPLUG_BASE}/telemetry/status"
+TOPIC_TELEMETRY_TEMPERATURE = f"{SMARTPLUG_BASE}/telemetry/temperature"
+TOPIC_TELEMETRY_ENERGY = f"{SMARTPLUG_BASE}/telemetry/energy"
+TOPIC_EVENTS_PROTECTION = f"{SMARTPLUG_BASE}/events/protection"
+TOPIC_STATE_RELAY = f"{SMARTPLUG_BASE}/state/relay"
+TOPIC_STATE_LED = f"{SMARTPLUG_BASE}/state/led"
+TOPIC_COMMAND_ACK = f"{SMARTPLUG_BASE}/commands/ack"
+TOPIC_COMMAND_RELAY = f"{SMARTPLUG_BASE}/commands/relay"
+TOPIC_COMMAND_CONFIG = f"{SMARTPLUG_BASE}/commands/config"
+TOPIC_WAVEFORM_REQUEST = f"{SMARTPLUG_BASE}/waveform/request"
+TOPIC_WAVEFORM_DATA = f"{SMARTPLUG_BASE}/waveform/data"
+
+# Legacy development aliases kept for transition/testing only.
+LEGACY_TOPIC_STATUS = "smartplug/status"
+LEGACY_TOPIC_EVENTS = "smartplug/events"
+LEGACY_TOPIC_RELAY = "smartplug/relay"
+LEGACY_TOPIC_LED = "smartplug/led"
+LEGACY_TOPIC_TEMPERATURE = "smartplug/temperature"
+LEGACY_TOPIC_ENERGY = "smartplug/energy"
+LEGACY_TOPIC_RELAY_CMD = "smartplug/cmd"
+LEGACY_TOPIC_AICE_CMD = "aice/cmd"
+LEGACY_TOPIC_AICE_STATUS = "aice/status"
+LEGACY_TOPIC_WAVEFORM_CHUNK = "smartplug/waveform/chunk"
+LEGACY_TOPIC_WAVEFORM_DATA = "smartplug/waveform"
+LEGACY_TOPIC_WAVEFORM_CMD = "smartplug/waveform/cmd"
+
+STATUS_TOPICS = {TOPIC_TELEMETRY_STATUS, LEGACY_TOPIC_STATUS}
+EVENT_TOPICS = {TOPIC_EVENTS_PROTECTION, LEGACY_TOPIC_EVENTS}
+RELAY_STATE_TOPICS = {TOPIC_STATE_RELAY, LEGACY_TOPIC_RELAY}
+LED_STATE_TOPICS = {TOPIC_STATE_LED, LEGACY_TOPIC_LED}
+TEMPERATURE_TOPICS = {TOPIC_TELEMETRY_TEMPERATURE, LEGACY_TOPIC_TEMPERATURE}
+ENERGY_TOPICS = {TOPIC_TELEMETRY_ENERGY, LEGACY_TOPIC_ENERGY}
+ACK_TOPICS = {TOPIC_COMMAND_ACK, LEGACY_TOPIC_AICE_STATUS}
+WAVEFORM_DATA_TOPICS = {TOPIC_WAVEFORM_DATA, LEGACY_TOPIC_WAVEFORM_CHUNK, LEGACY_TOPIC_WAVEFORM_DATA}
+COMMAND_TOPICS = {TOPIC_COMMAND_RELAY, TOPIC_COMMAND_CONFIG, TOPIC_WAVEFORM_REQUEST,
+                  LEGACY_TOPIC_RELAY_CMD, LEGACY_TOPIC_AICE_CMD, LEGACY_TOPIC_WAVEFORM_CMD}
 
 DEFAULT_SUBSCRIPTIONS = (
     "smartplug/#",
-    "aice/#",
+    "aice/#",  # transition only; harmless once firmware stops using aice/*
 )
 
 DEFAULT_BROKER = "192.168.137.1"
 DEFAULT_PORT = 1883
 DEFAULT_KEEPALIVE = 60
+DEFAULT_WAVEFORM_SAMPLE_COUNT = 512
+DEFAULT_WAVEFORM_SAMPLE_RATE_HZ = 6990
+
+
+# Backward-compatible constant aliases used by older scripts.
+SMARTPLUG_STATUS_TOPIC = TOPIC_TELEMETRY_STATUS
+SMARTPLUG_EVENTS_TOPIC = TOPIC_EVENTS_PROTECTION
+SMARTPLUG_RELAY_TOPIC = TOPIC_STATE_RELAY
+SMARTPLUG_LED_TOPIC = TOPIC_STATE_LED
+SMARTPLUG_TEMPERATURE_TOPIC = TOPIC_TELEMETRY_TEMPERATURE
+SMARTPLUG_ENERGY_TOPIC = TOPIC_TELEMETRY_ENERGY
+SMARTPLUG_CMD_TOPIC = TOPIC_COMMAND_RELAY
+AICE_CMD_TOPIC = TOPIC_COMMAND_CONFIG
+AICE_STATUS_TOPIC = TOPIC_COMMAND_ACK
 
 
 # -----------------------------------------------------------------------------
-# PC-side normalized data models for GUI usage
+# PC-side normalized data models
 # -----------------------------------------------------------------------------
 
 
 def now_iso_ms() -> str:
-    """Return a local PC timestamp with millisecond resolution."""
     return datetime.now().isoformat(timespec="milliseconds")
 
 
 @dataclass
 class TelemetrySample:
-    """Normalized current-firmware smartplug/status payload."""
-
     timestamp_received_pc: str
     vrms: Optional[float] = None
     irms: Optional[float] = None
@@ -94,7 +129,7 @@ class TelemetrySample:
     reactive_power: Optional[float] = None
     frequency: Optional[float] = None
     no_load: Optional[bool] = None
-    energy_wh: Optional[int] = None
+    energy_wh: Optional[float] = None
     relay: Optional[bool] = None
     tmp_c: Optional[float] = None
     raw: Dict[str, Any] = field(default_factory=dict)
@@ -103,24 +138,22 @@ class TelemetrySample:
     def from_payload(payload: Dict[str, Any]) -> "TelemetrySample":
         return TelemetrySample(
             timestamp_received_pc=now_iso_ms(),
-            vrms=_as_optional_float(payload.get("vrms")),
-            irms=_as_optional_float(payload.get("irms")),
-            pf=_as_optional_float(payload.get("pf")),
-            active_power=_as_optional_float(payload.get("active_power")),
-            reactive_power=_as_optional_float(payload.get("reactive_power")),
-            frequency=_as_optional_float(payload.get("frequency")),
+            vrms=_as_optional_float(_first_present(payload, "vrms", "voltage_vrms", "voltage")),
+            irms=_as_optional_float(_first_present(payload, "irms", "current_arms", "current_a", "current")),
+            pf=_as_optional_float(_first_present(payload, "pf", "power_factor")),
+            active_power=_as_optional_float(_first_present(payload, "active_power", "power_w", "power")),
+            reactive_power=_as_optional_float(_first_present(payload, "reactive_power", "reactive_power_var")),
+            frequency=_as_optional_float(_first_present(payload, "frequency", "frequency_hz")),
             no_load=_as_optional_bool(payload.get("no_load")),
-            energy_wh=_as_optional_int(payload.get("energy_wh")),
+            energy_wh=_as_optional_float(_first_present(payload, "energy_wh", "energy")),
             relay=_as_optional_bool(payload.get("relay")),
-            tmp_c=_as_optional_float(payload.get("tmp_c")),
+            tmp_c=_as_optional_float(_first_present(payload, "tmp_c", "temperature_c")),
             raw=payload,
         )
 
 
 @dataclass
 class CriticalEvent:
-    """Normalized current-firmware smartplug/events payload."""
-
     timestamp_received_pc: str
     event_type: Optional[str] = None
     cause: Optional[str] = None
@@ -141,8 +174,8 @@ class CriticalEvent:
             event_type=_as_optional_str(payload.get("event_type")),
             cause=_as_optional_str(payload.get("cause")),
             timestamp_device_ms=_as_optional_int(payload.get("timestamp")),
-            voltage_vrms=_as_optional_float(data.get("voltage_vrms")),
-            current_a_arms=_as_optional_float(data.get("current_a_arms")),
+            voltage_vrms=_as_optional_float(_first_present(data, "voltage_vrms", "vrms")),
+            current_a_arms=_as_optional_float(_first_present(data, "current_a_arms", "irms")),
             current_b_arms=_as_optional_float(data.get("current_b_arms")),
             duration_cycles=_as_optional_int(data.get("duration_cycles")),
             action_taken=_as_optional_str(payload.get("action_taken")),
@@ -152,23 +185,25 @@ class CriticalEvent:
 
 
 @dataclass
-class SafetyLimitAck:
-    """Normalized current-firmware aice/status payload."""
-
+class CommandAck:
     timestamp_received_pc: str
     event_type: Optional[str] = None
     accepted: Optional[bool] = None
+    command: Optional[str] = None
+    action: Optional[str] = None
     max_vrms: Optional[float] = None
     max_iarms: Optional[float] = None
     reason: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
-    def from_payload(payload: Dict[str, Any]) -> "SafetyLimitAck":
-        return SafetyLimitAck(
+    def from_payload(payload: Dict[str, Any]) -> "CommandAck":
+        return CommandAck(
             timestamp_received_pc=now_iso_ms(),
             event_type=_as_optional_str(payload.get("event_type")),
             accepted=_as_optional_bool(payload.get("accepted")),
+            command=_as_optional_str(payload.get("command")),
+            action=_as_optional_str(payload.get("action")),
             max_vrms=_as_optional_float(payload.get("max_vrms")),
             max_iarms=_as_optional_float(payload.get("max_iarms")),
             reason=_as_optional_str(payload.get("reason")),
@@ -176,11 +211,17 @@ class SafetyLimitAck:
         )
 
 
+# Backward-compatible name used by earlier GUI code.
+SafetyLimitAck = CommandAck
+
+
 @dataclass
 class RelayState:
     timestamp_received_pc: str
     event_type: Optional[str] = None
     relay: Optional[bool] = None
+    accepted: Optional[bool] = None
+    reason: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
@@ -189,6 +230,8 @@ class RelayState:
             timestamp_received_pc=now_iso_ms(),
             event_type=_as_optional_str(payload.get("event_type")),
             relay=_as_optional_bool(payload.get("relay")),
+            accepted=_as_optional_bool(payload.get("accepted")),
+            reason=_as_optional_str(payload.get("reason")),
             raw=payload,
         )
 
@@ -224,47 +267,58 @@ class TemperatureSample:
         return TemperatureSample(
             timestamp_received_pc=now_iso_ms(),
             event_type=_as_optional_str(payload.get("event_type")),
-            temperature_c=_as_optional_float(payload.get("temperature_c")),
+            temperature_c=_as_optional_float(_first_present(payload, "temperature_c", "tmp_c")),
             raw=payload,
         )
 
 
 @dataclass
 class EnergySample:
-    """Current-firmware smartplug/energy payload.
-
-    Note: current firmware uses generic keys: voltage, current, power, energy.
-    The combined smartplug/status package is preferred for the GUI because it
-    uses clearer names such as vrms, irms and active_power.
-    """
-
     timestamp_received_pc: str
     voltage: Optional[float] = None
     current: Optional[float] = None
     power: Optional[float] = None
-    energy: Optional[int] = None
+    energy: Optional[float] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def from_payload(payload: Dict[str, Any]) -> "EnergySample":
         return EnergySample(
             timestamp_received_pc=now_iso_ms(),
-            voltage=_as_optional_float(payload.get("voltage")),
-            current=_as_optional_float(payload.get("current")),
-            power=_as_optional_float(payload.get("power")),
-            energy=_as_optional_int(payload.get("energy")),
+            voltage=_as_optional_float(_first_present(payload, "voltage", "vrms")),
+            current=_as_optional_float(_first_present(payload, "current", "irms")),
+            power=_as_optional_float(_first_present(payload, "power", "active_power")),
+            energy=_as_optional_float(_first_present(payload, "energy", "energy_wh")),
+            raw=payload,
+        )
+
+
+@dataclass
+class WaveformMessage:
+    timestamp_received_pc: str
+    sample_count: Optional[int] = None
+    sampling_rate_hz: Optional[float] = None
+    duration_s: Optional[float] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+    @staticmethod
+    def from_payload(payload: Dict[str, Any]) -> "WaveformMessage":
+        signals = payload.get("signals") if isinstance(payload.get("signals"), dict) else {}
+        voltage_samples = signals.get("voltage_v") or payload.get("voltage_samples") or []
+        sample_count = _as_optional_int(payload.get("sample_count"))
+        if sample_count is None and isinstance(voltage_samples, list):
+            sample_count = len(voltage_samples)
+        return WaveformMessage(
+            timestamp_received_pc=now_iso_ms(),
+            sample_count=sample_count,
+            sampling_rate_hz=_as_optional_float(_first_present(payload, "sampling_rate_hz", "fs_hz")),
+            duration_s=_as_optional_float(payload.get("duration_s")),
             raw=payload,
         )
 
 
 @dataclass
 class CommandEcho:
-    """Observed command on a subscribed command topic.
-
-    MQTT clients subscribed to smartplug/# or aice/# may receive their own
-    published commands back from the broker. The GUI may ignore or log these.
-    """
-
     timestamp_received_pc: str
     topic: str
     command_text: Optional[str] = None
@@ -294,6 +348,13 @@ class ParsedMqttMessage:
 # -----------------------------------------------------------------------------
 
 
+def _first_present(mapping: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping:
+            return mapping.get(key)
+    return None
+
+
 def _as_optional_float(value: Any) -> Optional[float]:
     if value is None or isinstance(value, bool):
         return None
@@ -301,7 +362,6 @@ def _as_optional_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
-
 
 
 def _as_optional_int(value: Any) -> Optional[int]:
@@ -313,7 +373,6 @@ def _as_optional_int(value: Any) -> Optional[int]:
         return None
 
 
-
 def _as_optional_bool(value: Any) -> Optional[bool]:
     if isinstance(value, bool):
         return value
@@ -321,12 +380,11 @@ def _as_optional_bool(value: Any) -> Optional[bool]:
         return bool(value)
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in ("true", "1", "on", "yes"):
+        if normalized in ("true", "1", "on", "yes", "relay_on"):
             return True
-        if normalized in ("false", "0", "off", "no"):
+        if normalized in ("false", "0", "off", "no", "relay_off"):
             return False
     return None
-
 
 
 def _as_optional_str(value: Any) -> Optional[str]:
@@ -341,12 +399,6 @@ def _as_optional_str(value: Any) -> Optional[str]:
 
 
 def parse_mqtt_message(topic: str, payload_bytes: bytes) -> ParsedMqttMessage:
-    """Parse one MQTT message into a GUI-friendly normalized object.
-
-    This function intentionally routes by topic first because the current
-    firmware does not include event_type in every payload, especially
-    smartplug/status, smartplug/led and smartplug/energy.
-    """
     timestamp_pc = now_iso_ms()
 
     try:
@@ -371,8 +423,7 @@ def parse_mqtt_message(topic: str, payload_bytes: bytes) -> ParsedMqttMessage:
     except json.JSONDecodeError as exc:
         parsed_json_error = str(exc)
 
-    # Current firmware expects/uses plain text on smartplug/cmd.
-    if topic == SMARTPLUG_CMD_TOPIC:
+    if topic in COMMAND_TOPICS:
         return ParsedMqttMessage(
             topic=topic,
             kind="command_echo",
@@ -386,26 +437,9 @@ def parse_mqtt_message(topic: str, payload_bytes: bytes) -> ParsedMqttMessage:
                 command_json=json_payload,
                 raw_text=payload_text,
             ),
+            error=parsed_json_error if json_payload is None and topic != LEGACY_TOPIC_RELAY_CMD else None,
         )
 
-    if topic == AICE_CMD_TOPIC:
-        return ParsedMqttMessage(
-            topic=topic,
-            kind="safety_command_echo",
-            timestamp_received_pc=timestamp_pc,
-            payload_text=payload_text,
-            json_payload=json_payload,
-            data=CommandEcho(
-                timestamp_received_pc=timestamp_pc,
-                topic=topic,
-                command_text=None if json_payload else payload_text.strip(),
-                command_json=json_payload,
-                raw_text=payload_text,
-            ),
-            error=parsed_json_error if json_payload is None else None,
-        )
-
-    # All ESP32-to-PC topics below are expected to be JSON objects.
     if json_payload is None:
         return ParsedMqttMessage(
             topic=topic,
@@ -415,90 +449,45 @@ def parse_mqtt_message(topic: str, payload_bytes: bytes) -> ParsedMqttMessage:
             error=parsed_json_error or "Payload is not a JSON object",
         )
 
-    if topic == SMARTPLUG_STATUS_TOPIC:
-        return ParsedMqttMessage(
-            topic=topic,
-            kind="status",
-            timestamp_received_pc=timestamp_pc,
-            payload_text=payload_text,
-            json_payload=json_payload,
-            data=TelemetrySample.from_payload(json_payload),
-        )
+    if topic in STATUS_TOPICS:
+        return ParsedMqttMessage(topic, "status", timestamp_pc, payload_text, json_payload,
+                                 TelemetrySample.from_payload(json_payload))
 
-    if topic == SMARTPLUG_EVENTS_TOPIC:
+    if topic in EVENT_TOPICS:
         event_type = json_payload.get("event_type")
         kind = "critical_event" if event_type == "CRITICAL_PROTECTION" else "event"
-        return ParsedMqttMessage(
-            topic=topic,
-            kind=kind,
-            timestamp_received_pc=timestamp_pc,
-            payload_text=payload_text,
-            json_payload=json_payload,
-            data=CriticalEvent.from_payload(json_payload),
-        )
+        return ParsedMqttMessage(topic, kind, timestamp_pc, payload_text, json_payload,
+                                 CriticalEvent.from_payload(json_payload))
 
-    if topic == AICE_STATUS_TOPIC:
-        return ParsedMqttMessage(
-            topic=topic,
-            kind="safety_ack",
-            timestamp_received_pc=timestamp_pc,
-            payload_text=payload_text,
-            json_payload=json_payload,
-            data=SafetyLimitAck.from_payload(json_payload),
-        )
+    if topic in ACK_TOPICS:
+        return ParsedMqttMessage(topic, "command_ack", timestamp_pc, payload_text, json_payload,
+                                 CommandAck.from_payload(json_payload))
 
-    if topic == SMARTPLUG_RELAY_TOPIC:
-        return ParsedMqttMessage(
-            topic=topic,
-            kind="relay_state",
-            timestamp_received_pc=timestamp_pc,
-            payload_text=payload_text,
-            json_payload=json_payload,
-            data=RelayState.from_payload(json_payload),
-        )
+    if topic in RELAY_STATE_TOPICS:
+        return ParsedMqttMessage(topic, "relay_state", timestamp_pc, payload_text, json_payload,
+                                 RelayState.from_payload(json_payload))
 
-    if topic == SMARTPLUG_LED_TOPIC:
-        return ParsedMqttMessage(
-            topic=topic,
-            kind="led_state",
-            timestamp_received_pc=timestamp_pc,
-            payload_text=payload_text,
-            json_payload=json_payload,
-            data=LedState.from_payload(json_payload),
-        )
+    if topic in LED_STATE_TOPICS:
+        return ParsedMqttMessage(topic, "led_state", timestamp_pc, payload_text, json_payload,
+                                 LedState.from_payload(json_payload))
 
-    if topic == SMARTPLUG_TEMPERATURE_TOPIC:
-        return ParsedMqttMessage(
-            topic=topic,
-            kind="temperature",
-            timestamp_received_pc=timestamp_pc,
-            payload_text=payload_text,
-            json_payload=json_payload,
-            data=TemperatureSample.from_payload(json_payload),
-        )
+    if topic in TEMPERATURE_TOPICS:
+        return ParsedMqttMessage(topic, "temperature", timestamp_pc, payload_text, json_payload,
+                                 TemperatureSample.from_payload(json_payload))
 
-    if topic == SMARTPLUG_ENERGY_TOPIC:
-        return ParsedMqttMessage(
-            topic=topic,
-            kind="energy",
-            timestamp_received_pc=timestamp_pc,
-            payload_text=payload_text,
-            json_payload=json_payload,
-            data=EnergySample.from_payload(json_payload),
-        )
+    if topic in ENERGY_TOPICS:
+        return ParsedMqttMessage(topic, "energy", timestamp_pc, payload_text, json_payload,
+                                 EnergySample.from_payload(json_payload))
 
-    return ParsedMqttMessage(
-        topic=topic,
-        kind="unknown_json",
-        timestamp_received_pc=timestamp_pc,
-        payload_text=payload_text,
-        json_payload=json_payload,
-        data=json_payload,
-    )
+    if topic in WAVEFORM_DATA_TOPICS:
+        return ParsedMqttMessage(topic, "waveform", timestamp_pc, payload_text, json_payload,
+                                 WaveformMessage.from_payload(json_payload))
+
+    return ParsedMqttMessage(topic, "unknown_json", timestamp_pc, payload_text, json_payload, json_payload)
 
 
 # -----------------------------------------------------------------------------
-# Reusable MQTT client for GUI or console
+# Reusable MQTT client
 # -----------------------------------------------------------------------------
 
 
@@ -511,13 +500,6 @@ def _require_paho_mqtt() -> None:
 
 
 class SmartPlugMqttClient:
-    """Reusable MQTT client layer for the SmartPlug GUI.
-
-    For a GUI, avoid updating GUI widgets directly from MQTT callbacks because
-    they run in the MQTT network thread. Instead, poll `message_queue` from the
-    GUI main thread, or attach callbacks that forward events safely to the GUI.
-    """
-
     def __init__(
         self,
         broker: str = DEFAULT_BROKER,
@@ -539,8 +521,10 @@ class SmartPlugMqttClient:
         self.on_any_message: Optional[Callable[[ParsedMqttMessage], None]] = None
         self.on_status: Optional[Callable[[TelemetrySample], None]] = None
         self.on_critical_event: Optional[Callable[[CriticalEvent], None]] = None
-        self.on_safety_ack: Optional[Callable[[SafetyLimitAck], None]] = None
+        self.on_command_ack: Optional[Callable[[CommandAck], None]] = None
+        self.on_safety_ack: Optional[Callable[[CommandAck], None]] = None  # legacy callback name
         self.on_relay_state: Optional[Callable[[RelayState], None]] = None
+        self.on_connection_change: Optional[Callable[[bool, int], None]] = None
 
         _require_paho_mqtt()
         self.client = self._create_mqtt_client()
@@ -549,33 +533,31 @@ class SmartPlugMqttClient:
         self.client.on_message = self._on_message
 
     def _create_mqtt_client(self) -> mqtt.Client:
-        """Create a Paho client compatible with paho-mqtt 1.x and 2.x."""
         try:
-            # Paho MQTT 2.x supports this enum. VERSION1 preserves the older
-            # callback signatures used below and avoids breaking existing code.
             return mqtt.Client(
                 callback_api_version=mqtt.CallbackAPIVersion.VERSION1,
                 client_id=self.client_id,
                 clean_session=True,
             )
         except AttributeError:
-            # Paho MQTT 1.x
             return mqtt.Client(client_id=self.client_id, clean_session=True)
         except TypeError:
-            # Some 1.x/2.x installations differ slightly in constructor support.
             return mqtt.Client(client_id=self.client_id, clean_session=True)
 
     def _on_connect(self, client: mqtt.Client, userdata: Any, flags: Any, rc: int) -> None:
         self.is_connected = rc == 0
         timestamp = now_iso_ms()
+        if self.on_connection_change is not None:
+            self.on_connection_change(self.is_connected, rc)
 
         if rc != 0:
-            print(f"[{timestamp}] MQTT connection failed with code {rc}")
+            if self.console_print:
+                print(f"[{timestamp}] MQTT connection failed with code {rc}")
             return
 
         if self.console_print:
             print(f"\n[{timestamp}] Connected to MQTT broker at {self.broker}:{self.port}")
-            print(f"[{timestamp}] Subscribing to topics...")
+            print(f"[{timestamp}] Subscribing to topics: {', '.join(self.subscriptions)}")
 
         for topic in self.subscriptions:
             result, mid = client.subscribe(topic)
@@ -587,6 +569,8 @@ class SmartPlugMqttClient:
 
     def _on_disconnect(self, client: mqtt.Client, userdata: Any, rc: int) -> None:
         self.is_connected = False
+        if self.on_connection_change is not None:
+            self.on_connection_change(False, rc)
         if self.console_print:
             timestamp = now_iso_ms()
             if rc == 0:
@@ -598,7 +582,6 @@ class SmartPlugMqttClient:
         parsed = parse_mqtt_message(msg.topic, msg.payload)
         self.message_queue.put(parsed)
         self._dispatch_callbacks(parsed)
-
         if self.console_print:
             print(format_console_message(parsed))
             print(" > ", end="", flush=True)
@@ -611,8 +594,11 @@ class SmartPlugMqttClient:
             self.on_status(parsed.data)
         elif parsed.kind == "critical_event" and self.on_critical_event is not None:
             self.on_critical_event(parsed.data)
-        elif parsed.kind == "safety_ack" and self.on_safety_ack is not None:
-            self.on_safety_ack(parsed.data)
+        elif parsed.kind == "command_ack":
+            if self.on_command_ack is not None:
+                self.on_command_ack(parsed.data)
+            if self.on_safety_ack is not None:
+                self.on_safety_ack(parsed.data)
         elif parsed.kind == "relay_state" and self.on_relay_state is not None:
             self.on_relay_state(parsed.data)
 
@@ -620,44 +606,71 @@ class SmartPlugMqttClient:
         self.client.connect(self.broker, self.port, self.keepalive)
 
     def start(self) -> None:
-        """Connect and start the MQTT network loop in a background thread."""
         self.connect()
         self.client.loop_start()
 
     def stop(self) -> None:
-        """Disconnect and stop the MQTT network loop."""
         try:
             if self.is_connected:
                 self.client.disconnect()
         finally:
             self.client.loop_stop()
 
+    def reconnect(self, broker: str, port: Optional[int] = None) -> None:
+        self.stop()
+        self.broker = broker
+        if port is not None:
+            self.port = int(port)
+        self.client = self._create_mqtt_client()
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+        self.client.on_message = self._on_message
+        self.start()
+
     def publish_relay(self, relay_on: bool, qos: int = 1) -> mqtt.MQTTMessageInfo:
-        """Publish the relay command expected by current firmware.
-
-        Current module_mqtt.c expects plain text on smartplug/cmd, not JSON.
-        """
-        payload = "RELAY_ON" if relay_on else "RELAY_OFF"
-        return self.client.publish(SMARTPLUG_CMD_TOPIC, payload, qos=qos)
-
-    def publish_safety_limits(
-        self,
-        max_vrms: float,
-        max_iarms: float,
-        qos: int = 1,
-    ) -> mqtt.MQTTMessageInfo:
-        """Publish voltage/current RMS safety limits expected by current firmware."""
         payload = json.dumps(
             {
-                "max_vrms": float(max_vrms),
-                "max_iarms": float(max_iarms),
+                "command": "RELAY_ON" if relay_on else "RELAY_OFF",
+                "relay": bool(relay_on),
+                "source": "GUI",
+                "timestamp": now_iso_ms(),
             },
             separators=(",", ":"),
         )
-        return self.client.publish(AICE_CMD_TOPIC, payload, qos=qos)
+        return self.client.publish(TOPIC_COMMAND_RELAY, payload, qos=qos)
+
+    def publish_safety_limits(self, max_vrms: float, max_iarms: float, qos: int = 1) -> mqtt.MQTTMessageInfo:
+        payload = json.dumps(
+            {
+                "command": "SET_SAFETY_LIMITS",
+                "max_vrms": float(max_vrms),
+                "max_iarms": float(max_iarms),
+                "source": "GUI",
+                "timestamp": now_iso_ms(),
+            },
+            separators=(",", ":"),
+        )
+        return self.client.publish(TOPIC_COMMAND_CONFIG, payload, qos=qos)
+
+    def publish_waveform_request(
+        self,
+        sample_count: int = DEFAULT_WAVEFORM_SAMPLE_COUNT,
+        sampling_rate_hz: int = DEFAULT_WAVEFORM_SAMPLE_RATE_HZ,
+        qos: int = 1,
+    ) -> mqtt.MQTTMessageInfo:
+        payload = json.dumps(
+            {
+                "command": "REQUEST_WAVEFORM",
+                "sample_count": int(sample_count),
+                "sampling_rate_hz": int(sampling_rate_hz),
+                "source": "GUI",
+                "timestamp": now_iso_ms(),
+            },
+            separators=(",", ":"),
+        )
+        return self.client.publish(TOPIC_WAVEFORM_REQUEST, payload, qos=qos)
 
     def publish_raw(self, topic: str, payload: str, qos: int = 1) -> mqtt.MQTTMessageInfo:
-        """Development helper for sending arbitrary messages."""
         return self.client.publish(topic, payload, qos=qos)
 
 
@@ -674,14 +687,12 @@ def _fmt(value: Any, suffix: str = "", ndigits: int = 2) -> str:
     return f"{value}{suffix}"
 
 
-
 def _on_off(value: Optional[bool]) -> str:
     if value is True:
         return "ON"
     if value is False:
         return "OFF"
     return "--"
-
 
 
 def format_console_message(parsed: ParsedMqttMessage) -> str:
@@ -692,39 +703,28 @@ def format_console_message(parsed: ParsedMqttMessage) -> str:
         no_load_text = "YES" if d.no_load else "NO" if d.no_load is False else "--"
         return (
             f"\n[{ts}] STATUS {parsed.topic} | "
-            f"V={_fmt(d.vrms, ' Vrms')} | "
-            f"I={_fmt(d.irms, ' Arms', 3)} | "
-            f"P={_fmt(d.active_power, ' W')} | "
-            f"Q={_fmt(d.reactive_power, ' var')} | "
-            f"PF={_fmt(d.pf, '', 3)} | "
-            f"f={_fmt(d.frequency, ' Hz')} | "
-            f"E={_fmt(d.energy_wh, ' Wh')} | "
-            f"relay={_on_off(d.relay)} | "
-            f"no_load={no_load_text} | "
-            f"T={_fmt(d.tmp_c, ' °C')}"
+            f"V={_fmt(d.vrms, ' Vrms')} | I={_fmt(d.irms, ' Arms', 3)} | "
+            f"P={_fmt(d.active_power, ' W')} | Q={_fmt(d.reactive_power, ' var')} | "
+            f"PF={_fmt(d.pf, '', 3)} | f={_fmt(d.frequency, ' Hz')} | "
+            f"E={_fmt(d.energy_wh, ' Wh')} | relay={_on_off(d.relay)} | "
+            f"no_load={no_load_text} | T={_fmt(d.tmp_c, ' °C')}"
         )
 
     if parsed.kind == "critical_event" and isinstance(parsed.data, CriticalEvent):
         d = parsed.data
         return (
-            f"\n[{ts}] CRITICAL EVENT {parsed.topic} | "
-            f"cause={d.cause or '--'} | "
-            f"V={_fmt(d.voltage_vrms, ' Vrms')} | "
-            f"IA={_fmt(d.current_a_arms, ' Arms', 3)} | "
-            f"IB={_fmt(d.current_b_arms, ' Arms', 3)} | "
-            f"cycles={_fmt(d.duration_cycles)} | "
-            f"action={d.action_taken or '--'} | "
-            f"status={d.system_status or '--'}"
+            f"\n[{ts}] CRITICAL EVENT {parsed.topic} | cause={d.cause or '--'} | "
+            f"V={_fmt(d.voltage_vrms, ' Vrms')} | IA={_fmt(d.current_a_arms, ' Arms', 3)} | "
+            f"IB={_fmt(d.current_b_arms, ' Arms', 3)} | cycles={_fmt(d.duration_cycles)} | "
+            f"action={d.action_taken or '--'} | status={d.system_status or '--'}"
         )
 
-    if parsed.kind == "safety_ack" and isinstance(parsed.data, SafetyLimitAck):
+    if parsed.kind == "command_ack" and isinstance(parsed.data, CommandAck):
         d = parsed.data
         result = "ACCEPTED" if d.accepted else "REJECTED" if d.accepted is False else "UNKNOWN"
         return (
-            f"\n[{ts}] SAFETY ACK {parsed.topic} | "
-            f"{result} | "
-            f"max_vrms={_fmt(d.max_vrms, ' Vrms')} | "
-            f"max_iarms={_fmt(d.max_iarms, ' Arms', 3)} | "
+            f"\n[{ts}] COMMAND ACK {parsed.topic} | {d.event_type or '--'} | {result} | "
+            f"max_vrms={_fmt(d.max_vrms, ' Vrms')} | max_iarms={_fmt(d.max_iarms, ' Arms', 3)} | "
             f"reason={d.reason or '--'}"
         )
 
@@ -736,18 +736,23 @@ def format_console_message(parsed: ParsedMqttMessage) -> str:
         return f"\n[{ts}] LED {parsed.topic} | r={d.r} g={d.g} b={d.b}"
 
     if parsed.kind == "temperature" and isinstance(parsed.data, TemperatureSample):
-        d = parsed.data
-        return f"\n[{ts}] TEMPERATURE {parsed.topic} | T={_fmt(d.temperature_c, ' °C')}"
+        return f"\n[{ts}] TEMPERATURE {parsed.topic} | T={_fmt(parsed.data.temperature_c, ' °C')}"
 
     if parsed.kind == "energy" and isinstance(parsed.data, EnergySample):
         d = parsed.data
         return (
-            f"\n[{ts}] ENERGY {parsed.topic} | "
-            f"voltage={_fmt(d.voltage)} | current={_fmt(d.current)} | "
-            f"power={_fmt(d.power)} | energy={_fmt(d.energy)}"
+            f"\n[{ts}] ENERGY {parsed.topic} | voltage={_fmt(d.voltage)} | "
+            f"current={_fmt(d.current)} | power={_fmt(d.power)} | energy={_fmt(d.energy)}"
         )
 
-    if parsed.kind in ("command_echo", "safety_command_echo"):
+    if parsed.kind == "waveform" and isinstance(parsed.data, WaveformMessage):
+        d = parsed.data
+        return (
+            f"\n[{ts}] WAVEFORM {parsed.topic} | samples={d.sample_count or '--'} | "
+            f"fs={_fmt(d.sampling_rate_hz, ' Hz')} | duration={_fmt(d.duration_s, ' s', 4)}"
+        )
+
+    if parsed.kind == "command_echo":
         return f"\n[{ts}] COMMAND ECHO {parsed.topic} | {parsed.payload_text}"
 
     if parsed.error:
@@ -759,28 +764,22 @@ def format_console_message(parsed: ParsedMqttMessage) -> str:
     return f"\n[{ts}] {parsed.kind.upper()} {parsed.topic}: {parsed.payload_text}"
 
 
-
 def print_help() -> None:
     print(
-        """
+        f"""
 Commands:
-  relay on                 Publish RELAY_ON to smartplug/cmd
-  relay off                Publish RELAY_OFF to smartplug/cmd
+  relay on                 Publish JSON relay ON to {TOPIC_COMMAND_RELAY}
+  relay off                Publish JSON relay OFF to {TOPIC_COMMAND_RELAY}
   on                       Alias for: relay on
   off                      Alias for: relay off
-  set <vrms> <iarms>       Publish RMS safety limits to aice/cmd
+  set <vrms> <iarms>       Publish RMS safety limits to {TOPIC_COMMAND_CONFIG}
                            Example: set 135.0 5.0
+  wave                     Request one 512-sample waveform capture
   raw <topic> <payload>    Development helper to publish any payload
   help                     Show this help
   quit                     Exit
-
-Current firmware notes:
-  - Relay command payload is plain text: RELAY_ON / RELAY_OFF.
-  - Safety-limit command payload is JSON: {"max_vrms":135.0,"max_iarms":5.0}.
-  - Main dashboard topic is smartplug/status.
 """.strip()
     )
-
 
 
 def run_console(args: argparse.Namespace) -> int:
@@ -819,21 +818,21 @@ def run_console(args: argparse.Namespace) -> int:
 
             if normalized in ("quit", "exit"):
                 break
-
             if normalized == "help":
                 print_help()
                 continue
-
             if normalized in ("on", "relay on"):
                 smartplug.publish_relay(True)
-                print(f"Published to {SMARTPLUG_CMD_TOPIC}: RELAY_ON")
+                print(f"Published relay ON to {TOPIC_COMMAND_RELAY}")
                 continue
-
             if normalized in ("off", "relay off"):
                 smartplug.publish_relay(False)
-                print(f"Published to {SMARTPLUG_CMD_TOPIC}: RELAY_OFF")
+                print(f"Published relay OFF to {TOPIC_COMMAND_RELAY}")
                 continue
-
+            if normalized == "wave":
+                smartplug.publish_waveform_request()
+                print(f"Published waveform request to {TOPIC_WAVEFORM_REQUEST}")
+                continue
             if parts and parts[0].lower() == "set":
                 if len(parts) != 3:
                     print("Error: use set <vrms> <iarms>, for example: set 135.0 5.0")
@@ -845,12 +844,8 @@ def run_console(args: argparse.Namespace) -> int:
                     print("Error: vrms and iarms must be valid numbers")
                     continue
                 smartplug.publish_safety_limits(max_vrms, max_iarms)
-                print(
-                    f"Published to {AICE_CMD_TOPIC}: "
-                    f"{{\"max_vrms\":{max_vrms},\"max_iarms\":{max_iarms}}}"
-                )
+                print(f"Published safety limits to {TOPIC_COMMAND_CONFIG}")
                 continue
-
             if parts and parts[0].lower() == "raw":
                 if len(parts) < 3:
                     print("Error: use raw <topic> <payload>")
@@ -860,7 +855,6 @@ def run_console(args: argparse.Namespace) -> int:
                 smartplug.publish_raw(topic, payload)
                 print(f"Published raw message to {topic}: {payload}")
                 continue
-
             print("Unknown command. Type 'help' for options.")
 
     except ConnectionRefusedError:
@@ -876,7 +870,6 @@ def run_console(args: argparse.Namespace) -> int:
     return 0
 
 
-
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SmartPlug MQTT console/client")
     parser.add_argument("--broker", default=DEFAULT_BROKER, help="MQTT broker IP/hostname")
@@ -884,7 +877,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keepalive", type=int, default=DEFAULT_KEEPALIVE, help="MQTT keepalive seconds")
     parser.add_argument("--client-id", default="SmartPlug_PC_Console", help="MQTT client ID")
     return parser
-
 
 
 def main() -> int:
