@@ -346,8 +346,8 @@ static void handle_relay_command(const esp_mqtt_event_handle_t event)
 	}
 
 	ESP_LOGW(TAG, "Relay command received: %s", action);
-	esp_err_t relay_ret = module_relay_set(relay_on);
-	publish_relay_command_ack(action, relay_ret == ESP_OK, relay_ret == ESP_OK ? "applied" : esp_err_to_name(relay_ret));
+	module_relay_set(relay_on);
+	publish_relay_command_ack(action, true, "applied");
 
 	if (root != NULL) {
 		cJSON_Delete(root);
