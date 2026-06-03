@@ -490,8 +490,7 @@ class DummySmartPlugDataSource:
         if self.telemetry_paused:
             return
         self.telemetry_paused = True
-        worker = threading.Thread(target=self._waveform_capture_worker, daemon=True)
-        worker.start()
+        self._emit_mqtt_command("REQUEST_WAVEFORM", {"sample_count": 512, "sampling_rate_hz": 6990})
 
     def _waveform_capture_worker(self) -> None:
         # The real ESP32/ADE path is expected to pause base telemetry while
@@ -704,8 +703,8 @@ class MessageParser:
     def parse_waveform(data: Dict[str, Any]) -> WaveformPacket:
         signals = data.get("signals", {}) or {}
         analysis = data.get("analysis", {}) or {}
-        voltage_raw = signals.get("voltage_v", data.get("voltage_samples", data.get("voltage_v", [])))
-        current_raw = signals.get("current_a", data.get("current_samples", data.get("current_a", [])))
+        voltage_raw = signals.get("voltage_v", data.get("voltage_samples", data.get("v", [])))
+        current_raw = signals.get("current_a", data.get("current_samples", data.get("i", [])))
         voltage_samples = [safe_float(x) for x in voltage_raw]
         current_samples = [safe_float(x) for x in current_raw]
         sampling_rate = int(safe_float(data.get("sampling_rate_hz", data.get("fs_hz")), SAMPLE_RATE_HZ))
