@@ -62,6 +62,13 @@ static volatile bool s_snapshot_active = false;
 static TaskHandle_t s_waveform_capture_task_handle = NULL;
 static TaskHandle_t s_waveform_pub_task_handle = NULL;
 static portMUX_TYPE s_waveform_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// --- DEBUG SILENT COUNTERS ---
+static volatile uint32_t dbg_irq_wakeups = 0;
+static volatile uint32_t dbg_spi_failures = 0;
+static volatile uint32_t dbg_last_sample_index = 0;
+static volatile uint64_t dbg_last_wakeup_time_us = 0;
+
 #endif
 
 #ifndef ENABLE_IRQ_DEBUG_READBACK
@@ -69,12 +76,30 @@ static portMUX_TYPE s_waveform_mux = portMUX_INITIALIZER_UNLOCKED;
 #endif
 
 #if ENABLE_WAVEFORM_STREAM
-static void IRAM_ATTR ade7953_waveform_irq_handler(void *arg)
-{
+
+
+
+static void IRAM_ATTR unified_ade_gpio_isr_handler(void *arg) {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    if (s_waveform_capture_task_handle != NULL) {
-        vTaskNotifyGiveFromISR(s_waveform_capture_task_handle, &xHigherPriorityTaskWoken);
+
+    // Traffic Cop Logic: Where should this interrupt go?
+    if (module_ade7953_is_waveform_capturing()) {
+        
+        // 1. WAVEFORM MODE: Route to the high-speed background task
+        if (s_waveform_capture_task_handle != NULL) {
+            vTaskNotifyGiveFromISR(s_waveform_capture_task_handle, &xHigherPriorityTaskWoken);
+        }
+        
+    } else {
+        
+        // 2. NORMAL MODE: Route to your main task (where your button/trip loop is)
+        if (s_main_task_handle != NULL) {
+            vTaskNotifyGiveFromISR(s_main_task_handle, &xHigherPriorityTaskWoken);
+        }
+        
     }
+
+    // Force a context switch if a higher priority task just woke up
     if (xHigherPriorityTaskWoken == pdTRUE) {
         portYIELD_FROM_ISR();
     }
@@ -85,6 +110,9 @@ esp_err_t module_ade7953_start_snapshot_capture(void)
     if (s_waveform_capture_task_handle == NULL || s_waveform_pub_task_handle == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    ade7953_events_t dummy_events = {0};
+    module_ade7953_read_events(&dummy_events, true);
 
     portENTER_CRITICAL(&s_waveform_mux);
     if (s_snapshot_request_pending || s_snapshot_active) {
@@ -98,6 +126,7 @@ esp_err_t module_ade7953_start_snapshot_capture(void)
     s_ready_count = 0;
     s_chunk_ready = false;
     s_snapshot_request_pending = true;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(module_ade7953_set_waveform_capture_mode(true));
     portEXIT_CRITICAL(&s_waveform_mux);
 
     esp_err_t irq_ret = module_ade7953_configure_irq_masks(ADE7953_IRQ_A_OV | ADE7953_IRQ_A_OIA | ADE7953_IRQ_A_WSMP, 0);
@@ -107,6 +136,7 @@ esp_err_t module_ade7953_start_snapshot_capture(void)
         portEXIT_CRITICAL(&s_waveform_mux);
         return irq_ret;
     }
+    module_ade7953_write32(0x018, 0x00); // 0x018 is the WAVMODE register
 
     xTaskNotifyGive(s_waveform_capture_task_handle);
     ESP_LOGI(TAG, "Waveform snapshot requested: %d samples", WAVEFORM_CHUNK_SIZE);
@@ -125,22 +155,8 @@ static void waveform_stream_task(void *pvParameters)
     }
 
     while (true) {
-        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
-
-        if (!s_snapshot_active) {
-            bool start_requested = false;
-            portENTER_CRITICAL(&s_waveform_mux);
-            if (s_snapshot_request_pending) {
-                s_snapshot_request_pending = false;
-                s_snapshot_active = true;
-                start_requested = true;
-            }
-            portEXIT_CRITICAL(&s_waveform_mux);
-
-            if (!start_requested) {
-                continue;
-            }
-        }
+        // 1. WAIT FOREVER until the fast task gives us the 512 samples!
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
         int32_t *v_ptr = NULL;
         int32_t *i_ptr = NULL;
@@ -168,48 +184,20 @@ static void waveform_stream_task(void *pvParameters)
         int offset = snprintf(json_scratchpad, WAVEFORM_JSON_SCRATCHPAD_SIZE,
                               "{\"event_type\":\"WAVEFORM_CHUNK\",\"count\":%" PRIu16 ",\"v\":[",
                               sample_count);
-        if (offset < 0 || offset >= WAVEFORM_JSON_SCRATCHPAD_SIZE) {
-            ESP_LOGW(TAG, "Waveform JSON formatting failed at header");
-            continue;
-        }
 
         for (uint16_t i = 0; i < sample_count && offset < WAVEFORM_JSON_SCRATCHPAD_SIZE; ++i) {
-            offset += snprintf(json_scratchpad + offset,
-                               WAVEFORM_JSON_SCRATCHPAD_SIZE - offset,
-                               "%.2f%s",
-                               (float)v_ptr[i] * v_scale,
-                               (i + 1U == sample_count) ? "" : ",");
+            offset += snprintf(json_scratchpad + offset, WAVEFORM_JSON_SCRATCHPAD_SIZE - offset,
+                               "%.2f%s", (float)v_ptr[i] * v_scale, (i + 1U == sample_count) ? "" : ",");
         }
 
-        if (offset < 0 || offset >= WAVEFORM_JSON_SCRATCHPAD_SIZE) {
-            ESP_LOGW(TAG, "Waveform JSON formatting failed while writing voltage samples");
-            continue;
-        }
-
-        offset += snprintf(json_scratchpad + offset,
-                           WAVEFORM_JSON_SCRATCHPAD_SIZE - offset,
-                           "],\"i\":[");
-        if (offset < 0 || offset >= WAVEFORM_JSON_SCRATCHPAD_SIZE) {
-            ESP_LOGW(TAG, "Waveform JSON formatting failed before current samples");
-            continue;
-        }
+        offset += snprintf(json_scratchpad + offset, WAVEFORM_JSON_SCRATCHPAD_SIZE - offset, "],\"i\":[");
 
         for (uint16_t i = 0; i < sample_count && offset < WAVEFORM_JSON_SCRATCHPAD_SIZE; ++i) {
-            offset += snprintf(json_scratchpad + offset,
-                               WAVEFORM_JSON_SCRATCHPAD_SIZE - offset,
-                               "%.3f%s",
-                               (float)i_ptr[i] * i_scale,
-                               (i + 1U == sample_count) ? "" : ",");
+            offset += snprintf(json_scratchpad + offset, WAVEFORM_JSON_SCRATCHPAD_SIZE - offset,
+                               "%.3f%s", (float)i_ptr[i] * i_scale, (i + 1U == sample_count) ? "" : ",");
         }
 
-        if (offset < 0 || offset >= WAVEFORM_JSON_SCRATCHPAD_SIZE) {
-            ESP_LOGW(TAG, "Waveform JSON formatting failed while writing current samples");
-            continue;
-        }
-
-        snprintf(json_scratchpad + offset,
-                 WAVEFORM_JSON_SCRATCHPAD_SIZE - offset,
-                 "]}");
+        snprintf(json_scratchpad + offset, WAVEFORM_JSON_SCRATCHPAD_SIZE - offset, "]}");
 
         esp_err_t publish_ret = module_mqtt_publish_waveform_chunk(json_scratchpad);
         if (publish_ret != ESP_OK) {
@@ -218,10 +206,8 @@ static void waveform_stream_task(void *pvParameters)
             ESP_LOGI(TAG, "Waveform snapshot sent successfully");
         }
 
-        portENTER_CRITICAL(&s_waveform_mux);
-        s_snapshot_active = false;
-        portEXIT_CRITICAL(&s_waveform_mux);
-
+        // 2. CLEANUP: Lower the shields and turn off the hardware stream
+        ESP_ERROR_CHECK_WITHOUT_ABORT(module_ade7953_set_waveform_capture_mode(false));
         ESP_ERROR_CHECK_WITHOUT_ABORT(module_ade7953_configure_irq_masks(ADE7953_IRQ_A_OV | ADE7953_IRQ_A_OIA, 0));
     }
 
@@ -540,28 +526,36 @@ static void IRAM_ATTR ade7953_safety_irq_handler(void *arg)
 static void waveform_capture_task(void *pvParameters)
 {
     (void)pvParameters;
-
     s_waveform_capture_task_handle = xTaskGetCurrentTaskHandle();
 
-    ESP_ERROR_CHECK_WITHOUT_ABORT(module_ade7953_configure_irq_masks(ADE7953_IRQ_A_OV | ADE7953_IRQ_A_OIA, 0));
-
     while (true) {
+        // 1. Sleep until the Unified ISR wakes us up (7,000 times a second)
         if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) == 0) {
             continue;
+        }
+        dbg_irq_wakeups++;
+        dbg_last_wakeup_time_us = esp_timer_get_time();
+
+        // 2. Self-start logic: Transition state if a snapshot is pending
+        if (s_snapshot_request_pending) {
+            s_snapshot_request_pending = false;
+            s_snapshot_active = true;
+            s_chunk_index = 0;
+
+            // reset debug counters for this snapshot session
+            dbg_irq_wakeups = 1; 
+            dbg_spi_failures = 0;
         }
 
         if (!s_snapshot_active) {
             continue;
         }
 
-        ade7953_events_t events = {0};
-        if (module_ade7953_read_events(&events, true) != ESP_OK || !events.waveform_sample_ready) {
-            continue;
-        }
-
+        // This function reads V, IA, and 0x32E (which clears the hardware latch instantly)
         int32_t v_sample = 0;
         int32_t i_sample = 0;
         if (module_ade7953_read_waveform_samples(&v_sample, &i_sample) != ESP_OK) {
+            dbg_spi_failures++; // debug counter for SPI read failures
             continue;
         }
 
@@ -570,6 +564,7 @@ static void waveform_capture_task(void *pvParameters)
         portENTER_CRITICAL(&s_waveform_mux);
         int32_t *v_buf = (s_active_buffer == 0) ? s_raw_v_buf0 : s_raw_v_buf1;
         int32_t *i_buf = (s_active_buffer == 0) ? s_raw_i_buf0 : s_raw_i_buf1;
+        
         v_buf[s_chunk_index] = v_sample;
         i_buf[s_chunk_index] = i_sample;
         s_chunk_index++;
@@ -578,12 +573,15 @@ static void waveform_capture_task(void *pvParameters)
             s_ready_buffer = s_active_buffer;
             s_ready_count = s_chunk_index;
             s_chunk_ready = true;
-            s_active_buffer = (s_active_buffer == 0) ? 1 : 0;
+            
+            s_snapshot_active = false; 
+            s_active_buffer = (s_active_buffer == 0) ? 1 : 0; 
             s_chunk_index = 0;
             notify_publish_task = true;
         }
         portEXIT_CRITICAL(&s_waveform_mux);
 
+        // 4. Send to MQTT when finished!
         if (notify_publish_task && s_waveform_pub_task_handle != NULL) {
             xTaskNotifyGive(s_waveform_pub_task_handle);
         }
@@ -612,7 +610,7 @@ static void ade_irq_isr_setup(const smartplug_board_pins_t *pins, const ade_irq_
     if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
         ESP_ERROR_CHECK(isr_ret);
     }
-    ESP_ERROR_CHECK(gpio_isr_handler_add(pins->ade_irq_gpio, ade7953_safety_irq_handler, NULL));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(pins->ade_irq_gpio, unified_ade_gpio_isr_handler, NULL));
 }
 
 // Dedicated FreeRTOS task to handle LED colors and blinking asynchronously (GRB Hardware Mapping)
@@ -742,6 +740,14 @@ void app_main(void)
         }
         ade7953_calibration_t ade_cal = {0};
         if (module_ade7953_get_default_calibration(&ade_cal) == ESP_OK) {
+            const float kw_lsb = ade_cal.volts_per_vrms_lsb * ade_cal.amps_per_irmsa_lsb * 16777216.0f;
+            ade_cal.watts_per_awatt_lsb = kw_lsb;
+            ade_cal.watts_per_bwatt_lsb = kw_lsb;
+            ade_cal.vars_per_avar_lsb = kw_lsb;
+            ade_cal.vars_per_bvar_lsb = kw_lsb;
+            ade_cal.va_per_ava_lsb = kw_lsb;
+            ade_cal.va_per_bva_lsb = kw_lsb;
+
             module_ade7953_set_calibration(&ade_cal);
             ESP_LOGI(TAG,
                      "Applied ADE scale calibration: kv=%.8f ki=%.8f kw=%.8e wh=%.8e",
@@ -779,12 +785,18 @@ void app_main(void)
     ade7953_events_t critical_protection_irq_events = {0};
     
     while (true) {
+
         bool ade_irq_pending = false;
         while (ulTaskNotifyTake(pdTRUE, 0) > 0) {
             ade_irq_pending = true;
         }
+
         if (ade_irq_pending == true) {
-            if (!critical_protection_active) {
+            if (module_ade7953_is_waveform_capturing()) {
+                // Do absolutely nothing! 
+            }
+            
+            else if (!critical_protection_active) {
                 g_relay_on = false;            // Sync the MQTT payload state
                 aice_set_status(STATUS_ERROR); // Turn the LED Red
 
@@ -952,6 +964,13 @@ void app_main(void)
                     }
                 }
 #endif
+                if (module_ade7953_is_waveform_capturing()) {
+                ESP_LOGW(TAG, "Waveform STUCK! Debug -> Wakeups: %" PRIu32 " | Index: %" PRIu32 "/512 | SPI Fails: %" PRIu32 " | Time since last IRQ: %llu us",
+                     dbg_irq_wakeups,
+                     dbg_last_sample_index,
+                     dbg_spi_failures,
+                     (esp_timer_get_time() - dbg_last_wakeup_time_us));
+                } else {
                 esp_err_t ade_ret = module_ade7953_read_measurement(&measurement, true, true);
                 if (ade_ret == ESP_OK) {
                     ade_measurement_ok = true;
@@ -975,7 +994,7 @@ void app_main(void)
                     ESP_LOGW(TAG, "ADE7953 read failed: %s", esp_err_to_name(ade_ret));
                     sensor_error = true;
                 }
-            } else {
+            }} else {
                 sensor_error = true;
             }
 
@@ -1020,7 +1039,7 @@ void app_main(void)
                     measurement.reactive_power_a_var,
                     measurement.line_frequency_hz,
                     ade7953_measurement_has_no_load(&measurement),
-                    (uint32_t)(measurement.active_energy_a_wh_total + 0.5f),
+                    measurement.active_energy_a_wh_total,
                     g_relay_on);
                 if (mqtt_ret != ESP_OK) {
                     ESP_LOGW(TAG, "MQTT status publish failed: %s", esp_err_to_name(mqtt_ret));

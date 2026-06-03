@@ -399,6 +399,7 @@ esp_err_t module_ade7953_init(void);
 esp_err_t module_ade7953_init_with_config(const ade7953_config_t *config);
 esp_err_t module_ade7953_deinit(void);
 bool module_ade7953_is_initialized(void);
+bool module_ade7953_is_waveform_capturing(void);
 
 /* Low-level register access */
 esp_err_t module_ade7953_read8(uint16_t reg, uint8_t *value);
@@ -408,6 +409,7 @@ esp_err_t module_ade7953_read32(uint16_t reg, uint32_t *value);
 esp_err_t module_ade7953_read_s24(uint16_t reg, int32_t *value);
 esp_err_t module_ade7953_read_s32(uint16_t reg, int32_t *value);
 esp_err_t module_ade7953_read_waveform_samples(int32_t *v_waveform, int32_t *ia_waveform);
+esp_err_t module_ade7953_set_waveform_capture_mode(bool enabled);
 esp_err_t module_ade7953_write8(uint16_t reg, uint8_t value);
 esp_err_t module_ade7953_write16(uint16_t reg, uint16_t value);
 esp_err_t module_ade7953_write24(uint16_t reg, uint32_t value);

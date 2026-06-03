@@ -27,6 +27,7 @@
 #define ADE7953_DEFAULT_PHCALA_RAW      ((uint16_t)(0x200U | 0x07FU))
 
 static const char *TAG = "ade7953";
+static SemaphoreHandle_t s_ade_spi_mutex = NULL;
 
 static spi_device_handle_t s_spi = NULL;
 static ade7953_config_t s_cfg = {0};
@@ -57,6 +58,7 @@ static float s_total_reactive_energy_a_varh = 0.0f;
 static float s_total_reactive_energy_b_varh = 0.0f;
 static float s_total_apparent_energy_a_vah = 0.0f;
 static float s_total_apparent_energy_b_vah = 0.0f;
+static volatile bool s_waveform_capture_mode = false;
 
 static const uint32_t ADE7953_SAFE_IRQ_A_MASK =
     ADE7953_IRQ_A_SAG |
@@ -82,6 +84,14 @@ static esp_err_t spi_read_bytes(uint16_t reg, uint8_t *data, size_t len)
         return ESP_ERR_INVALID_ARG;
     }
 
+    // --- GRAB THE LOCK ---
+    if (s_ade_spi_mutex != NULL) {
+        if (xSemaphoreTake(s_ade_spi_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+            ESP_LOGE(TAG, "SPI Read Mutex timeout!");
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+
     uint8_t tx[ADE7953_SPI_TRANS_MAX_BYTES] = {0};
     uint8_t rx[ADE7953_SPI_TRANS_MAX_BYTES] = {0};
 
@@ -98,6 +108,12 @@ static esp_err_t spi_read_bytes(uint16_t reg, uint8_t *data, size_t len)
     err = spi_device_polling_transmit(s_spi, &transaction);
     esp_rom_delay_us(2);
     gpio_set_level(s_cfg.cs_gpio, 1);
+
+    // --- RELEASE THE LOCK ---
+    if (s_ade_spi_mutex != NULL) {
+        xSemaphoreGive(s_ade_spi_mutex);
+    }
+
     if (err != ESP_OK) {
         return err;
     }
@@ -116,6 +132,14 @@ static esp_err_t spi_write_bytes(uint16_t reg, const uint8_t *data, size_t len)
         return ESP_ERR_INVALID_ARG;
     }
 
+    // --- GRAB THE LOCK ---
+    if (s_ade_spi_mutex != NULL) {
+        if (xSemaphoreTake(s_ade_spi_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+            ESP_LOGE(TAG, "SPI Write Mutex timeout!");
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+
     uint8_t tx[ADE7953_SPI_TRANS_MAX_BYTES] = {0};
     tx[0] = (uint8_t)((reg >> 8) & 0xFF);
     tx[1] = (uint8_t)(reg & 0xFF);
@@ -130,6 +154,12 @@ static esp_err_t spi_write_bytes(uint16_t reg, const uint8_t *data, size_t len)
     err = spi_device_polling_transmit(s_spi, &transaction);
     esp_rom_delay_us(2);
     gpio_set_level(s_cfg.cs_gpio, 1);
+
+    // --- RELEASE THE LOCK ---
+    if (s_ade_spi_mutex != NULL) {
+        xSemaphoreGive(s_ade_spi_mutex);
+    }
+
     return err;
 }
 
@@ -196,6 +226,12 @@ esp_err_t module_ade7953_init_with_config(const ade7953_config_t *config)
     if (config == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    
+    if (s_ade_spi_mutex == NULL) {
+        s_ade_spi_mutex = xSemaphoreCreateMutex();
+        if (s_ade_spi_mutex == NULL) return ESP_ERR_NO_MEM;
+    }
+
     if (config->cs_gpio == GPIO_NUM_NC || config->mosi_gpio == GPIO_NUM_NC ||
         config->miso_gpio == GPIO_NUM_NC || config->sclk_gpio == GPIO_NUM_NC) {
         return ESP_ERR_INVALID_ARG;
@@ -388,15 +424,30 @@ esp_err_t module_ade7953_read_s32(uint16_t reg, int32_t *value)
     return ESP_OK;
 }
 
-esp_err_t module_ade7953_read_waveform_samples(int32_t *v_waveform, int32_t *ia_waveform)
+esp_err_t module_ade7953_read_waveform_samples(int32_t *v_out, int32_t *i_out)
 {
-    if (v_waveform == NULL || ia_waveform == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
+    // 1. Read the Instantaneous Voltage
+    esp_err_t ret_v = module_ade7953_read32(ADE7953_REG_V_32, (uint32_t *)v_out);
+    // 2. Read the Instantaneous Current (Channel A)
+    esp_err_t ret_i = module_ade7953_read32(ADE7953_REG_IA_32, (uint32_t *)i_out);
+    uint32_t dummy_irq;
+    module_ade7953_read32(0x32E, &dummy_irq);
 
-    ESP_RETURN_ON_ERROR(module_ade7953_read_s32(ADE7953_REG_V_32, v_waveform), TAG, "V waveform read failed");
-    ESP_RETURN_ON_ERROR(module_ade7953_read_s32(ADE7953_REG_IA_32, ia_waveform), TAG, "IA waveform read failed");
+    if (ret_v != ESP_OK || ret_i != ESP_OK) {
+        return ESP_FAIL;
+    }
     return ESP_OK;
+}
+
+esp_err_t module_ade7953_set_waveform_capture_mode(bool enabled)
+{
+    s_waveform_capture_mode = enabled;
+    return ESP_OK;
+}
+
+bool module_ade7953_is_waveform_capturing(void)
+{
+    return s_waveform_capture_mode;
 }
 
 esp_err_t module_ade7953_write8(uint16_t reg, uint8_t value)
@@ -1059,9 +1110,13 @@ void module_ade7953_evaluate_safety(const ade7953_measurement_t *measurement,
     }
 
     if (limits->enable_hw_critical_trip) {
+        uint32_t irq_a = measurement->raw.irq_a;
+        if (s_waveform_capture_mode) {
+            irq_a &= (uint32_t)~ADE7953_IRQ_A_WSMP;
+        }
         out_decision->ade_hw_critical_event =
-            ((measurement->raw.irq_a & ADE7953_SAFE_IRQ_A_MASK) != 0) ||
-            ((measurement->raw.irq_b & ADE7953_SAFE_IRQ_B_MASK) != 0);
+            ((irq_a & ~ADE7953_SAFE_IRQ_A_MASK) != 0) ||
+            ((measurement->raw.irq_b & ~ADE7953_SAFE_IRQ_B_MASK) != 0);
     }
 
     if (limits->enable_rms_voltage_limits && s_cal.volts_per_vrms_lsb > 0.0f) {
@@ -1071,14 +1126,12 @@ void module_ade7953_evaluate_safety(const ade7953_measurement_t *measurement,
 
     if (limits->enable_rms_current_limit) {
         bool a_over = (s_cal.amps_per_irmsa_lsb > 0.0f) && (measurement->current_a_arms > limits->max_current_a_arms);
-        bool b_over = (s_cal.amps_per_irmsb_lsb > 0.0f) && (measurement->current_b_arms > limits->max_current_a_arms);
-        out_decision->overcurrent_event = a_over || b_over;
+        out_decision->overcurrent_event = a_over;
     }
 
     if (limits->enable_active_power_limit) {
         bool a_over = (s_cal.watts_per_awatt_lsb > 0.0f) && (fabsf(measurement->active_power_a_w) > limits->max_active_power_w);
-        bool b_over = (s_cal.watts_per_bwatt_lsb > 0.0f) && (fabsf(measurement->active_power_b_w) > limits->max_active_power_w);
-        out_decision->overpower_event = a_over || b_over;
+        out_decision->overpower_event = a_over;
     }
 
     out_decision->trip = out_decision->ade_hw_critical_event ||

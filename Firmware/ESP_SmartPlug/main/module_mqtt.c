@@ -694,7 +694,7 @@ esp_err_t module_mqtt_publish_status(float temperature_c,
                                      float reactive_power,
                                      float frequency,
                                      bool no_load,
-                                     uint32_t energy_wh,
+									 float energy_wh,
                                      bool relay_state)
 {
 	if (!module_mqtt_is_connected()) {
@@ -711,7 +711,7 @@ esp_err_t module_mqtt_publish_status(float temperature_c,
 		     "\"reactive_power\":%.2f,"
 		     "\"frequency\":%.2f,"
 		     "\"no_load\":%s,"
-		     "\"energy_wh\":%" PRIu32 ","
+		     "\"energy_wh\":%.4f,"
 		     "\"relay\":%s,"
 		     "\"tmp_c\":%.2f"
 		     "}",

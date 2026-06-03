@@ -126,15 +126,15 @@ esp_err_t module_mqtt_publish_critical_protection(const char *cause,
  * @return ESP_OK on success, error code otherwise
  */
 esp_err_t module_mqtt_publish_status(float temperature_c,
-									 float vrms,
-									 float irms,
-									 float pf,
-									 float active_power,
-									 float reactive_power,
-									 float frequency,
-									 bool no_load,
-									 uint32_t energy_wh,
-									 bool relay_state);
+											 float vrms,
+											 float irms,
+											 float pf,
+											 float active_power,
+											 float reactive_power,
+											 float frequency,
+											 bool no_load,
+											 float energy_wh,
+											 bool relay_state);
 
 /**
  * @brief Publish a waveform chunk payload
