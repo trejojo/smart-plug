@@ -761,7 +761,7 @@ void app_main(void)
 
 #if ENABLE_WAVEFORM_STREAM
         xTaskCreate(waveform_stream_task, "waveform_stream_task", 4096, NULL, 5, NULL);
-        xTaskCreate(waveform_capture_task, "waveform_capture_task", 4096, NULL, 6, NULL);
+        xTaskCreate(waveform_capture_task, "waveform_capture_task", 4096, NULL, 20, NULL);
 #endif
     } else {
         ESP_LOGE(TAG, "ADE7953 init failed, continuing without metering: %s", esp_err_to_name(ade_init_ret));
