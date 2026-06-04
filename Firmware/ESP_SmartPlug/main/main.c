@@ -29,6 +29,9 @@ static const char *TAG = "aice_smartplug"; // Updated TAG to AICE
 static bool g_relay_on = false;
 static bool g_mqtt_connect_requested = false;
 static TickType_t g_mqtt_connect_requested_tick = 0;
+static bool g_gui_relay_explicit_cmd_pending = false;
+static bool g_gui_relay_explicit_cmd_target = false;
+static bool g_gui_relay_toggle_requested = false;
 
 static const char *MQTT_BROKER_IP = "192.168.137.1";
 static const uint16_t MQTT_BROKER_PORT = 1883;
@@ -36,7 +39,6 @@ static const uint16_t MQTT_BROKER_PORT = 1883;
 static TaskHandle_t s_main_task_handle = NULL;
 static gpio_num_t s_relay_gpio = GPIO_NUM_NC;
 static gpio_num_t s_ade_irq_gpio = GPIO_NUM_NC;
-static volatile bool g_gui_relay_toggle_requested = false;
 static portMUX_TYPE g_gui_relay_request_mux = portMUX_INITIALIZER_UNLOCKED;
 
 #ifndef ENABLE_WAVEFORM_STREAM
@@ -327,15 +329,34 @@ static esp_err_t aice_queue_relay_command(const char *action, void *user_data)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (strcmp(action, "toggle_relay") != 0 && strcmp(action, "relay_toggle") != 0 && strcmp(action, "RELAY_TOGGLE") != 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
+    ESP_LOGI(TAG, "MQTT Callback evaluating relay action: '%s'", action);
 
     portENTER_CRITICAL(&g_gui_relay_request_mux);
-    g_gui_relay_toggle_requested = true;
-    portEXIT_CRITICAL(&g_gui_relay_request_mux);
 
-    return ESP_OK;
+    // 1. Explicit commands from the GUI
+    if (strcmp(action, "RELAY_ON") == 0 || strcmp(action, "ON") == 0) {
+        g_gui_relay_explicit_cmd_pending = true;
+        g_gui_relay_explicit_cmd_target = true;  // Target = ON
+        portEXIT_CRITICAL(&g_gui_relay_request_mux);
+        return ESP_OK; // Prevents the 258 Error!
+    } 
+    else if (strcmp(action, "RELAY_OFF") == 0 || strcmp(action, "OFF") == 0) {
+        g_gui_relay_explicit_cmd_pending = true;
+        g_gui_relay_explicit_cmd_target = false; // Target = OFF
+        portEXIT_CRITICAL(&g_gui_relay_request_mux);
+        return ESP_OK; // Prevents the 258 Error!
+    }
+    // 2. Legacy Toggle command (Keeps old functionality intact)
+    else if (strcmp(action, "toggle_relay") == 0 || strcmp(action, "relay_toggle") == 0 || strcmp(action, "RELAY_TOGGLE") == 0) {
+        g_gui_relay_toggle_requested = true;
+        portEXIT_CRITICAL(&g_gui_relay_request_mux);
+        return ESP_OK;
+    }
+
+    // 3. If it receives garbage text, reject it
+    portEXIT_CRITICAL(&g_gui_relay_request_mux);
+    ESP_LOGE(TAG, "Unrecognized relay action received via MQTT: '%s'", action);
+    return ESP_ERR_INVALID_ARG;
 }
 
 static void aice_handle_relay_toggle_request(const char *source,
@@ -961,15 +982,43 @@ void app_main(void)
         }
 
         bool gui_relay_toggle_requested = false;
+        bool explicit_cmd_pending = false;
+        bool explicit_cmd_target = false;
+
+        // Safely extract ALL the flags
         portENTER_CRITICAL(&g_gui_relay_request_mux);
+        
         if (g_gui_relay_toggle_requested) {
             gui_relay_toggle_requested = true;
             g_gui_relay_toggle_requested = false;
         }
+        if (g_gui_relay_explicit_cmd_pending) {
+            explicit_cmd_pending = true;
+            explicit_cmd_target = g_gui_relay_explicit_cmd_target;
+            g_gui_relay_explicit_cmd_pending = false;
+        }
+        
         portEXIT_CRITICAL(&g_gui_relay_request_mux);
 
         if (gui_relay_toggle_requested) {
             aice_handle_relay_toggle_request("GUI relay command", credentials_in_nvs, &critical_protection_active, &critical_protection_started_ms);
+        }
+
+        // 2. Process NEW Explicit "ON/OFF" logic (from our new GUI)
+        if (explicit_cmd_pending) {
+            ESP_LOGI(TAG, "Executing explicit MQTT command: %s", explicit_cmd_target ? "ON" : "OFF");
+            
+            // Physically toggle the hardware relay pin
+            module_relay_set(explicit_cmd_target);
+            
+            // Update the global telemetry variable so the GUI receives the right state
+            g_relay_on = explicit_cmd_target;
+            
+            // If the user forces the plug back ON manually after a trip, clear the alarm
+            if (explicit_cmd_target == true && critical_protection_active) {
+                ESP_LOGI(TAG, "Clearing critical protection state due to explicit user ON command");
+                critical_protection_active = false;
+            }
         }
 
         // -------------------------------------------------------------
