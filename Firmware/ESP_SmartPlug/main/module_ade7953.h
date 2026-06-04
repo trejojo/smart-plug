@@ -26,7 +26,7 @@ extern "C" {
  */
 
 #define ADE7953_SPI_MAX_HZ              (5000000)
-#define ADE7953_SPI_DEFAULT_HZ          (1000000)
+#define ADE7953_SPI_DEFAULT_HZ          (5000000)
 #define ADE7953_FREQ_CLOCK_HZ           (223750.0f)
 #define ADE7953_ANGLE_LSB_SECONDS       (4.47e-6f)
 

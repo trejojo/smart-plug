@@ -344,10 +344,21 @@ static void handle_relay_command(const esp_mqtt_event_handle_t event)
 		}
 		return;
 	}
-
 	ESP_LOGW(TAG, "Relay command received: %s", action);
-	module_relay_set(relay_on);
-	publish_relay_command_ack(action, true, "applied");
+	bool applied_successfully = false;
+	
+	if (s_relay_command_handler != NULL) {
+        esp_err_t err = s_relay_command_handler(action, s_relay_command_handler_user_data);
+        if (err == ESP_OK) {
+            applied_successfully = true;
+        } else {
+            ESP_LOGE(TAG, "Relay handler failed with error code: %d", err);
+        }
+    } else {
+        ESP_LOGW(TAG, "Relay command handler is not registered!");
+    }
+
+	publish_relay_command_ack(action, applied_successfully, applied_successfully ? "applied" : "hardware error");
 
 	if (root != NULL) {
 		cJSON_Delete(root);

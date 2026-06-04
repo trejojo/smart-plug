@@ -529,60 +529,151 @@ static void waveform_capture_task(void *pvParameters)
     s_waveform_capture_task_handle = xTaskGetCurrentTaskHandle();
 
     while (true) {
-        // 1. Sleep until the Unified ISR wakes us up (7,000 times a second)
+        // Sleep permanently until the MQTT handler triggers a new snapshot request
         if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) == 0) {
             continue;
         }
-        dbg_irq_wakeups++;
-        dbg_last_wakeup_time_us = esp_timer_get_time();
 
-        // 2. Self-start logic: Transition state if a snapshot is pending
-        if (s_snapshot_request_pending) {
-            s_snapshot_request_pending = false;
-            s_snapshot_active = true;
-            s_chunk_index = 0;
-
-            // reset debug counters for this snapshot session
-            dbg_irq_wakeups = 1; 
-            dbg_spi_failures = 0;
-        }
-
-        if (!s_snapshot_active) {
-            continue;
-        }
-
-        // This function reads V, IA, and 0x32E (which clears the hardware latch instantly)
-        int32_t v_sample = 0;
-        int32_t i_sample = 0;
-        if (module_ade7953_read_waveform_samples(&v_sample, &i_sample) != ESP_OK) {
-            dbg_spi_failures++; // debug counter for SPI read failures
-            continue;
-        }
-
-        bool notify_publish_task = false;
-
-        portENTER_CRITICAL(&s_waveform_mux);
-        int32_t *v_buf = (s_active_buffer == 0) ? s_raw_v_buf0 : s_raw_v_buf1;
-        int32_t *i_buf = (s_active_buffer == 0) ? s_raw_i_buf0 : s_raw_i_buf1;
+        int attempts_left = 5;
+        bool capture_successful = false;
         
-        v_buf[s_chunk_index] = v_sample;
-        i_buf[s_chunk_index] = i_sample;
-        s_chunk_index++;
+        uint64_t profile_start_us = 0;
+        uint64_t profile_end_us = 0;
 
-        if (s_chunk_index >= WAVEFORM_CHUNK_SIZE) {
-            s_ready_buffer = s_active_buffer;
-            s_ready_count = s_chunk_index;
-            s_chunk_ready = true;
+        while (attempts_left > 0 && !capture_successful) {
             
-            s_snapshot_active = false; 
-            s_active_buffer = (s_active_buffer == 0) ? 1 : 0; 
-            s_chunk_index = 0;
-            notify_publish_task = true;
-        }
-        portEXIT_CRITICAL(&s_waveform_mux);
+            if (attempts_left < 5) {
+                ESP_LOGW(TAG, "Retrying waveform capture... Attempts remaining: %d", attempts_left);
+                
+                ade7953_events_t cleanup_events;
+                module_ade7953_read_events(&cleanup_events, true);
+                
+                portENTER_CRITICAL(&s_waveform_mux);
+                s_snapshot_request_pending = false;
+                s_snapshot_active = true;
+                s_chunk_index = 0;
+                portEXIT_CRITICAL(&s_waveform_mux);
 
-        // 4. Send to MQTT when finished!
-        if (notify_publish_task && s_waveform_pub_task_handle != NULL) {
+                // NOTE: We no longer re-arm the high-speed WSMP interrupt here
+                // because we are using software polling!
+            } 
+            else if (s_snapshot_request_pending) {
+                s_snapshot_request_pending = false;
+                s_snapshot_active = true;
+                s_chunk_index = 0;
+                
+                dbg_irq_wakeups = 0; 
+                dbg_spi_failures = 0;
+            }
+
+            if (!s_snapshot_active) {
+                break; 
+            }
+
+            uint64_t capture_start_time_us = (uint64_t)esp_timer_get_time();
+            profile_start_us = capture_start_time_us; 
+            bool snapshot_timeout_tripped = false;
+
+            // ==============================================================
+            // SOFTWARE POLLING TARGET: 2400 Hz (416 microseconds)
+            // ==============================================================
+            uint64_t target_period_us = 416; 
+            uint64_t next_sample_time_us = capture_start_time_us + target_period_us;
+
+            // Purge any lingering FreeRTOS notifications before we enter the fast loop
+            // to ensure no leftover hardware interrupts mess with our timing.
+            ulTaskNotifyTake(pdTRUE, 0);
+
+            // --- HIGH SPEED SOFTWARE-DRIVEN SAMPLING WINDOW ---
+            while (s_snapshot_active) {
+                
+                // Watchdog: 1 full second limit
+                if (((uint64_t)esp_timer_get_time() - capture_start_time_us) > 1000000ULL) {
+                    snapshot_timeout_tripped = true;
+                    break; 
+                }
+
+                // 1. PRECISION MICROSECOND WAIT LOOP 
+                // This completely replaces ulTaskNotifyTake!
+                while ((uint64_t)esp_timer_get_time() < next_sample_time_us) {
+                    esp_rom_delay_us(5); // Tiny micro-sleep prevents OS crashes
+                }
+
+                // Lock in target for the next loop to prevent drift
+                next_sample_time_us += target_period_us;
+
+                dbg_last_wakeup_time_us = (uint64_t)esp_timer_get_time(); 
+
+                // 2. Read latest data from ADE7953 over SPI
+                int32_t v_sample = 0;
+                int32_t i_sample = 0;
+                if (module_ade7953_read_waveform_samples(&v_sample, &i_sample) != ESP_OK) {
+                    dbg_spi_failures++;
+                    continue;
+                }
+
+                portENTER_CRITICAL(&s_waveform_mux);
+                int32_t *v_buf = (s_active_buffer == 0) ? s_raw_v_buf0 : s_raw_v_buf1;
+                int32_t *i_buf = (s_active_buffer == 0) ? s_raw_i_buf0 : s_raw_i_buf1;
+                
+                v_buf[s_chunk_index] = v_sample;
+                i_buf[s_chunk_index] = i_sample;
+                s_chunk_index++;
+                dbg_last_sample_index = s_chunk_index;
+
+                if (s_chunk_index >= WAVEFORM_CHUNK_SIZE) {
+                    profile_end_us = (uint64_t)esp_timer_get_time(); 
+                    s_ready_buffer = s_active_buffer;
+                    s_ready_count = s_chunk_index;
+                    s_chunk_ready = true;
+                    s_snapshot_active = false; 
+                    s_active_buffer = (s_active_buffer == 0) ? 1 : 0; 
+                    s_chunk_index = 0;
+                    capture_successful = true; 
+                }
+                portEXIT_CRITICAL(&s_waveform_mux);
+            }
+
+            if (snapshot_timeout_tripped) {
+                ESP_LOGE(TAG, "Attempt failed! Watchdog tripped at sample %" PRIu32 "/512.", dbg_last_sample_index);
+                attempts_left--;
+                
+                portENTER_CRITICAL(&s_waveform_mux);
+                s_snapshot_active = false;
+                portEXIT_CRITICAL(&s_waveform_mux);
+                
+                vTaskDelay(pdMS_TO_TICKS(10)); 
+            }
+        }
+
+        if (!capture_successful) {
+            ESP_LOGE(TAG, "Fatal: All 5 capture attempts failed.");
+            
+            portENTER_CRITICAL(&s_waveform_mux);
+            s_snapshot_active = false;
+            s_chunk_ready = false;
+            s_chunk_index = 0;
+            portEXIT_CRITICAL(&s_waveform_mux);
+
+            ESP_ERROR_CHECK_WITHOUT_ABORT(module_ade7953_set_waveform_capture_mode(false));
+            ESP_ERROR_CHECK_WITHOUT_ABORT(module_ade7953_configure_irq_masks(ADE7953_IRQ_A_OV | ADE7953_IRQ_A_OIA, 0));
+            
+            ade7953_events_t final_cleanup;
+            module_ade7953_read_events(&final_cleanup, true);
+            continue; 
+        }
+
+        // --- SUCCESS PATH: Profile and Publish ---
+        uint64_t total_duration_us = profile_end_us - profile_start_us;
+        float actual_sampling_rate_hz = 0.0f;
+        if (total_duration_us > 0) {
+            actual_sampling_rate_hz = ((float)WAVEFORM_CHUNK_SIZE / (float)total_duration_us) * 1000000.0f;
+        }
+        
+        ESP_LOGI(TAG, "Profile: Captured %d samples safely. Elapsed time: %llu us. Measured Frequency: %.2f Hz", 
+                 WAVEFORM_CHUNK_SIZE, total_duration_us, actual_sampling_rate_hz);
+
+        if (s_waveform_pub_task_handle != NULL) {
             xTaskNotifyGive(s_waveform_pub_task_handle);
         }
     }
@@ -761,7 +852,13 @@ void app_main(void)
 
 #if ENABLE_WAVEFORM_STREAM
         xTaskCreate(waveform_stream_task, "waveform_stream_task", 4096, NULL, 5, NULL);
-        xTaskCreate(waveform_capture_task, "waveform_capture_task", 4096, NULL, 20, NULL);
+        xTaskCreatePinnedToCore(waveform_capture_task, 
+                       "waveform_capture_task", 
+                       4096, 
+                       NULL, 
+                       20,         // Keep priority high
+                       NULL, 
+                       1);
 #endif
     } else {
         ESP_LOGE(TAG, "ADE7953 init failed, continuing without metering: %s", esp_err_to_name(ade_init_ret));
