@@ -1119,10 +1119,16 @@ class RelayControlPanel(tk.Frame):
         text = "Relay: ON" if is_on else "Relay: OFF"
         color = Theme.GOOD if is_on else Theme.BAD
         self.state_label.configure(text=text, fg=color)
+        
+        # Visually disable the redundant button and enable the available action
         if is_on:
             self.notice_label.configure(text="Load energized. ADE7953 protections remain active.", fg=Theme.GOOD)
+            self.on_btn.configure(state="disabled", bg=Theme.PANEL_2, fg=Theme.MUTED)
+            self.off_btn.configure(state="normal", bg=Theme.BAD, fg=Theme.WHITE)
         else:
             self.notice_label.configure(text="Relay open. Load is not energized from the smart plug.", fg=Theme.SUBTLE)
+            self.on_btn.configure(state="normal", bg=Theme.GOOD, fg=Theme.BLACK)
+            self.off_btn.configure(state="disabled", bg=Theme.PANEL_2, fg=Theme.MUTED)
 
     def set_protection(self, event: CriticalEvent) -> None:
         self.state_label.configure(text="Relay: OFF", fg=Theme.BAD)
@@ -1130,6 +1136,9 @@ class RelayControlPanel(tk.Frame):
             text=f"Protection trip: {event.cause}. Relay opened by ADE7953 interrupt. Inspect load/wiring, then TURN ON to retry.",
             fg=Theme.WARN,
         )
+        # Because the hardware forcefully opened the relay, we sync the GUI buttons to allow turning it back on
+        self.on_btn.configure(state="normal", bg=Theme.GOOD, fg=Theme.BLACK)
+        self.off_btn.configure(state="disabled", bg=Theme.PANEL_2, fg=Theme.MUTED)
 
 class SafetyLimitsPanel(tk.Frame):
     PRESETS = {
@@ -1794,6 +1803,7 @@ class SmartPlugApp:
         self.phase = PHASE_PROVISIONING
         self.latest_telemetry = TelemetrySample()
         self.collecting_waveform = False
+        self._waveform_req_id = 0
 
         self._setup_ttk_style()
         self.header = HeaderBar(self.root, self)
@@ -2001,6 +2011,19 @@ class SmartPlugApp:
             self.collecting_waveform = True
             self.dashboard_frame.set_collecting(True, WAVEFORM_CAPTURE_SECONDS)
             self.dashboard_frame.status_panel.set_waveform("Collecting 512 samples at 6.99 kHz…", Theme.WARN)
+            
+            # --- NEW: 2-second timeout condition ---
+            self._waveform_req_id += 1
+            current_req = self._waveform_req_id
+            self.root.after(2000, lambda: self._check_waveform_timeout(current_req))
+
+    def _check_waveform_timeout(self, req_id: int) -> None:
+        # If we are still marked as collecting and the request ID matches, it means we never got the packet.
+        if self.collecting_waveform and self._waveform_req_id == req_id:
+            self.collecting_waveform = False
+            self.dashboard_frame.set_collecting(False)
+            self.dashboard_frame.status_panel.set_waveform("Waveform request timed out (2s).", Theme.BAD)
+            self.log("Waveform request timed out after 2 seconds without response.", level="error")
 
     def _publish_to_device(self, topic: str, payload: str, publish_fn: Callable[[], bool]) -> bool:
         try:
