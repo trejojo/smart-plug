@@ -123,19 +123,22 @@ static void IRAM_ATTR unified_ade_gpio_isr_handler(void *arg) {
 
 esp_err_t module_ade7953_start_snapshot_capture(void)
 {
+    // Ensure the necessary FreeRTOS tasks are actually running
     if (s_waveform_capture_task_handle == NULL || s_waveform_pub_task_handle == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-
+    // Purge any lingering ADE7953 events before starting fresh
     ade7953_events_t dummy_events = {0};
     module_ade7953_read_events(&dummy_events, true);
 
+    // Reset ping-pong buffer indices and state flags
     portENTER_CRITICAL(&s_waveform_mux);
     if (s_snapshot_request_pending || s_snapshot_active) {
         portEXIT_CRITICAL(&s_waveform_mux);
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Tell the ADE driver to enter waveform streaming mode
     s_active_buffer = 0;
     s_chunk_index = 0;
     s_ready_buffer = 0;
@@ -145,6 +148,7 @@ esp_err_t module_ade7953_start_snapshot_capture(void)
     ESP_ERROR_CHECK_WITHOUT_ABORT(module_ade7953_set_waveform_capture_mode(true));
     portEXIT_CRITICAL(&s_waveform_mux);
 
+    // Configure hardware interrupts for Overvoltage, Overcurrent, and Waveform Sample Ready (WSMP)
     esp_err_t irq_ret = module_ade7953_configure_irq_masks(ADE7953_IRQ_A_OV | ADE7953_IRQ_A_OIA | ADE7953_IRQ_A_WSMP, 0);
     if (irq_ret != ESP_OK) {
         portENTER_CRITICAL(&s_waveform_mux);
@@ -152,13 +156,21 @@ esp_err_t module_ade7953_start_snapshot_capture(void)
         portEXIT_CRITICAL(&s_waveform_mux);
         return irq_ret;
     }
+    // Write 0x00 to WAVMODE register to select Voltage and Current streaming
     module_ade7953_write32(0x018, 0x00); // 0x018 is the WAVMODE register
 
+    // Wake up the background capture task
     xTaskNotifyGive(s_waveform_capture_task_handle);
     ESP_LOGI(TAG, "Waveform snapshot requested: %d samples", WAVEFORM_CHUNK_SIZE);
     return ESP_OK;
 }
 
+/**
+ * @brief FreeRTOS task responsible for formatting and publishing waveform data via MQTT.
+ * Waits for a complete chunk of data from the high-speed capture task, applies 
+ * calibration scaling to convert raw LSBs into real-world Volts and Amps, 
+ * packages it into a JSON array, and sends it out over MQTT.
+ */
 static void waveform_stream_task(void *pvParameters)
 {
     s_waveform_pub_task_handle = xTaskGetCurrentTaskHandle();
@@ -230,6 +242,7 @@ static void waveform_stream_task(void *pvParameters)
     free(json_scratchpad);
 }
 #endif
+
 
 typedef enum {
     STATUS_IDLE = 0,
