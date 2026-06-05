@@ -80,11 +80,17 @@ static volatile uint64_t dbg_last_wakeup_time_us = 0;
 #if ENABLE_WAVEFORM_STREAM
 
 
+/**
+ * @brief Unified ISR handler for the ADE7953 interrupt pin.
+ * Acts as a traffic cop routing the hardware interrupt to the appropriate FreeRTOS task.
+ * If a waveform capture is active, it wakes up the high-priority capture task.
+ * Otherwise, it wakes up the standard main task for routine telemetry.
+ */
 
 static void IRAM_ATTR unified_ade_gpio_isr_handler(void *arg) {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
-    // Traffic Cop Logic: Where should this interrupt go?
+    // Traffic Cop Logic
     if (module_ade7953_is_waveform_capturing()) {
         
         // 1. WAVEFORM MODE: Route to the high-speed background task
@@ -94,7 +100,7 @@ static void IRAM_ATTR unified_ade_gpio_isr_handler(void *arg) {
         
     } else {
         
-        // 2. NORMAL MODE: Route to your main task (where your button/trip loop is)
+        // 2. NORMAL MODE: Route to main task
         if (s_main_task_handle != NULL) {
             vTaskNotifyGiveFromISR(s_main_task_handle, &xHigherPriorityTaskWoken);
         }
@@ -106,6 +112,14 @@ static void IRAM_ATTR unified_ade_gpio_isr_handler(void *arg) {
         portYIELD_FROM_ISR();
     }
 }
+
+/**
+ * @brief Initiates a high-speed waveform snapshot capture.
+ * * Verifies system state, clears pending events, initializes buffers, sets the 
+ * ADE7953 into waveform mode, configures the IRQ masks to fire on new samples (WSMP), 
+ * and wakes up the waveform capture task.
+ * * @return ESP_OK if successfully started, or an error code if already busy/invalid state.
+ */
 
 esp_err_t module_ade7953_start_snapshot_capture(void)
 {
