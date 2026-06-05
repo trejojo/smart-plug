@@ -1025,7 +1025,7 @@ void app_main(void)
         // SLOW LOGIC: SENSORS & NETWORK (Every 1000ms)
         // -------------------------------------------------------------
         sensor_timer_ticks++;
-        if (sensor_timer_ticks >= 20) {
+        if (sensor_timer_ticks >= 10) {
             sensor_timer_ticks = 0; // Reset 1-second timer
 
             bool ade_trip = false;
