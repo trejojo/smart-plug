@@ -31,6 +31,7 @@ import os
 import queue
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -112,6 +113,11 @@ SPECIAL_TOPIC_BLE_RESULT = "__internal/ble_result"
 PHASE_PROVISIONING = "provisioning"
 PHASE_DASHBOARD = "dashboard"
 PHASE_RECONNECTING = "reconnecting"
+
+# GUI-side device heartbeat watchdog. This detects when the ESP32 stops
+# publishing telemetry while the PC MQTT client remains connected to Mosquitto.
+DEVICE_HEARTBEAT_TIMEOUT_S = 3.0
+DEVICE_HEARTBEAT_CHECK_MS = 500
 
 
 class Theme:
@@ -1491,53 +1497,84 @@ class WaveformAnalysisPanel(tk.Frame):
 
         w = max(320, c.winfo_width())
         h = max(200, c.winfo_height())
-        pad_l, pad_r, pad_t, pad_b = 70, 18, 24, 58
+        # In Both mode the spectrum uses two independent Y axes because voltage
+        # and current are different physical quantities. The right padding leaves
+        # space for the current axis labels.
+        pad_l, pad_r, pad_t, pad_b = 76, 68 if mode == "Both" else 22, 24, 58
         plot_w = max(20, w - pad_l - pad_r)
         plot_h = max(40, h - pad_t - pad_b)
 
         v_values = [safe_float(h.get("voltage_mag_vpk")) for h in harmonics]
         i_values = [safe_float(h.get("current_mag_apk")) for h in harmonics]
-        if mode == "Voltage":
-            max_val = max(max(v_values), 1e-9)
-        elif mode == "Current":
-            max_val = max(max(i_values), 1e-9)
-        else:
-            max_val = max(max(v_values), max(i_values), 1e-9)
         freqs = [int(round(safe_float(h.get("frequency_hz", (idx + 1) * NOMINAL_FREQ_HZ)))) for idx, h in enumerate(harmonics)]
 
+        def axis_max(values: List[float]) -> float:
+            raw = max(max(values) if values else 0.0, 1e-9)
+            # A small headroom avoids bars touching the plot border.
+            return raw * 1.12
+
+        max_v = axis_max(v_values)
+        max_i = axis_max(i_values)
+        max_single = max_v if mode == "Voltage" else max_i if mode == "Current" else max(max_v, max_i)
+
         c.create_rectangle(pad_l, pad_t, pad_l + plot_w, pad_t + plot_h, outline=Theme.BORDER)
-        for j in range(5):
-            frac = j / 4
-            y = pad_t + frac * plot_h
-            value = max_val * (1.0 - frac)
-            c.create_line(pad_l, y, pad_l + plot_w, y, fill="#24324a")
-            c.create_line(pad_l - 5, y, pad_l, y, fill=Theme.MUTED)
-            c.create_text(pad_l - 8, y, anchor="e", text=f"{value:.2f}", fill=Theme.MUTED, font=("Segoe UI", 7))
+
+        def draw_axis(max_val: float, side: str, label: str, color: str, draw_grid: bool = False) -> None:
+            for j in range(5):
+                frac = j / 4
+                y = pad_t + frac * plot_h
+                value = max_val * (1.0 - frac)
+                if draw_grid:
+                    c.create_line(pad_l, y, pad_l + plot_w, y, fill="#24324a")
+                if side == "left":
+                    c.create_line(pad_l - 5, y, pad_l, y, fill=Theme.MUTED)
+                    c.create_text(pad_l - 8, y, anchor="e", text=f"{value:.2f}", fill=color, font=("Segoe UI", 7))
+                    c.create_text(18, pad_t + plot_h / 2, text=label, angle=90, fill=color, font=("Segoe UI", 8, "bold"))
+                else:
+                    axis_x = pad_l + plot_w
+                    c.create_line(axis_x, y, axis_x + 5, y, fill=Theme.MUTED)
+                    c.create_text(axis_x + 8, y, anchor="w", text=f"{value:.3f}", fill=color, font=("Segoe UI", 7))
+                    c.create_text(w - 16, pad_t + plot_h / 2, text=label, angle=90, fill=color, font=("Segoe UI", 8, "bold"))
+
+        if mode == "Both":
+            draw_axis(max_v, "left", "Voltage [Vpk]", Theme.ACCENT, draw_grid=True)
+            draw_axis(max_i, "right", "Current [Apk]", Theme.PURPLE, draw_grid=False)
+        elif mode == "Voltage":
+            draw_axis(max_v, "left", "Voltage [Vpk]", Theme.ACCENT, draw_grid=True)
+        else:
+            draw_axis(max_i, "left", "Current [Apk]", Theme.PURPLE, draw_grid=True)
 
         group_count = max(1, len(harmonics))
         group_w = plot_w / group_count
         for idx in range(group_count):
             x_group = pad_l + idx * group_w
             if mode == "Both":
-                bar_w = max(2, group_w * 0.32)
-                vals = [(v_values[idx], Theme.ACCENT, x_group + group_w * 0.18), (i_values[idx], Theme.PURPLE, x_group + group_w * 0.52)]
-            elif mode == "Voltage":
-                bar_w = max(3, group_w * 0.52)
-                vals = [(v_values[idx], Theme.ACCENT, x_group + group_w * 0.24)]
+                bar_w = max(2, group_w * 0.30)
+                v_x0 = x_group + group_w * 0.18
+                i_x0 = x_group + group_w * 0.52
+                y_base = pad_t + plot_h
+                v_y0 = y_base - (v_values[idx] / max_v) * plot_h
+                i_y0 = y_base - (i_values[idx] / max_i) * plot_h
+                c.create_rectangle(v_x0, v_y0, v_x0 + bar_w, y_base, fill=Theme.ACCENT, outline="")
+                c.create_rectangle(i_x0, i_y0, i_x0 + bar_w, y_base, fill=Theme.PURPLE, outline="")
             else:
                 bar_w = max(3, group_w * 0.52)
-                vals = [(i_values[idx], Theme.PURPLE, x_group + group_w * 0.24)]
-            for val, color, x0 in vals:
-                x1 = x0 + bar_w
-                y1 = pad_t + plot_h
-                y0 = y1 - (val / max_val) * plot_h
-                c.create_rectangle(x0, y0, x1, y1, fill=color, outline="")
+                val = v_values[idx] if mode == "Voltage" else i_values[idx]
+                color = Theme.ACCENT if mode == "Voltage" else Theme.PURPLE
+                x0 = x_group + group_w * 0.24
+                y_base = pad_t + plot_h
+                y0 = y_base - (val / max_single) * plot_h
+                c.create_rectangle(x0, y0, x0 + bar_w, y_base, fill=color, outline="")
+
             label_x = x_group + group_w / 2
             c.create_text(label_x, pad_t + plot_h + 20, text=str(freqs[idx]), angle=90,
                           fill=Theme.MUTED, font=("Segoe UI", 7, "bold"))
 
-        c.create_text(pad_l, 10, anchor="w", text="Magnitude (pk)", fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
-        c.create_text(18, pad_t + plot_h / 2, text="Magnitude", angle=90, fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
+        if mode == "Both":
+            c.create_text(pad_l, 10, anchor="w", text="FFT amplitude · dual Y axes", fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
+        else:
+            unit = "Vpk" if mode == "Voltage" else "Apk"
+            c.create_text(pad_l, 10, anchor="w", text=f"FFT amplitude [{unit}]", fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
         c.create_text(pad_l + plot_w / 2, h - 8, text="Frequency [Hz] / Harmonic order", fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
 
     def show_sample_table(self) -> None:
@@ -1835,6 +1872,9 @@ class SmartPlugApp:
         self.latest_telemetry = TelemetrySample()
         self.collecting_waveform = False
         self._waveform_req_id = 0
+        self.last_telemetry_monotonic: Optional[float] = None
+        self.device_online = False
+        self._heartbeat_lost_reported = False
 
         self._setup_ttk_style()
         self.header = HeaderBar(self.root, self)
@@ -1848,6 +1888,7 @@ class SmartPlugApp:
         self.set_phase(PHASE_PROVISIONING)
         self.data_source.start()
         self.root.after(100, self._process_incoming_queue)
+        self.root.after(DEVICE_HEARTBEAT_CHECK_MS, self._check_device_heartbeat)
         self.log(f"GUI initialized. Connecting to MQTT broker {DEFAULT_BROKER}:{DEFAULT_PORT}.", level="success")
 
     def _setup_ttk_style(self) -> None:
@@ -1904,9 +1945,49 @@ class SmartPlugApp:
         finally:
             self.root.after(100, self._process_incoming_queue)
 
+    def _check_device_heartbeat(self) -> None:
+        """Return to the provisioning/reconnection screen if device telemetry stops.
+
+        This watchdog intentionally does not depend on the MQTT client's
+        disconnect callback. The PC can remain connected to Mosquitto while the
+        ESP32 is powered off, rebooting or in BLE pairing mode. The device is
+        considered online only while fresh smartplug/telemetry/status packets
+        keep arriving.
+        """
+        try:
+            if self.phase == PHASE_DASHBOARD and not self.collecting_waveform and self.last_telemetry_monotonic is not None:
+                elapsed_s = time.monotonic() - self.last_telemetry_monotonic
+                if elapsed_s > DEVICE_HEARTBEAT_TIMEOUT_S:
+                    self.device_online = False
+                    if not self._heartbeat_lost_reported:
+                        self._heartbeat_lost_reported = True
+                        self.log(
+                            f"Device heartbeat lost: no telemetry for {elapsed_s:.1f} s. Returning to provisioning/reconnection screen.",
+                            level="warning",
+                        )
+                    self.set_phase(PHASE_RECONNECTING)
+                    self.provisioning_frame.status_label.configure(
+                        text=(
+                            "Smart Plug telemetry was lost. If the device is in pairing mode, send credentials over BLE; "
+                            "otherwise keep the broker running and wait for MQTT telemetry to return."
+                        ),
+                        fg=Theme.WARN,
+                    )
+                    self.provisioning_frame.small_note.configure(
+                        text=(
+                            f"Status: no smartplug/telemetry/status for more than {DEVICE_HEARTBEAT_TIMEOUT_S:.0f} s. "
+                            "The GUI will return to the main dashboard when telemetry is received."
+                        )
+                    )
+        finally:
+            self.root.after(DEVICE_HEARTBEAT_CHECK_MS, self._check_device_heartbeat)
+
     # Incoming handlers --------------------------------------------------------
     def on_telemetry(self, sample: TelemetrySample) -> None:
         self.latest_telemetry = sample
+        self.last_telemetry_monotonic = time.monotonic()
+        self.device_online = True
+        self._heartbeat_lost_reported = False
         if self.phase in (PHASE_RECONNECTING, PHASE_PROVISIONING):
             self.set_phase(PHASE_DASHBOARD)
         if self.phase == PHASE_DASHBOARD:

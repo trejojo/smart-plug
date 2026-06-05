@@ -116,7 +116,7 @@ The GUI accepts the preferred waveform payload shape:
 }
 ```
 
-The PC GUI recomputes harmonic magnitudes, THD, V-I phase angle and time shift from the raw samples.
+The PC GUI recomputes harmonic magnitudes, THD, V-I phase angle and time shift from the raw samples. In `Both` mode, the waveform plot uses a left voltage axis and right current axis; the FFT plot also uses independent voltage/current Y axes.
 
 ## 6. Dashboard calculations
 
@@ -140,7 +140,19 @@ Available exports:
 
 Each button opens a Windows file-save dialog so the user can choose the destination.
 
-## 8. Running the broker
+## 8. Device heartbeat watchdog
+
+The GUI does not rely on the MQTT client disconnect callback to detect that the ESP32 is gone. The PC may remain connected to the local Mosquitto broker even when the Smart Plug powers off, reboots or enters BLE pairing mode.
+
+Instead, the GUI treats `smartplug/telemetry/status` as the device heartbeat. If no status telemetry is received for more than 3 seconds while the main dashboard is active, the GUI returns to the provisioning/reconnection screen and waits for telemetry to return. The timeout is defined in `smartplug_gui.py` as:
+
+```python
+DEVICE_HEARTBEAT_TIMEOUT_S = 3.0
+```
+
+This watchdog is a GUI-side fallback. A future firmware-level MQTT Last Will / availability topic would be a more formal device-state signal, but it is not required for the current PC-side behavior.
+
+## 9. Running the broker
 
 From `Software/telemetry`:
 
@@ -155,7 +167,7 @@ listener 1883 0.0.0.0
 allow_anonymous true
 ```
 
-## 9. Running the live GUI
+## 10. Running the live GUI
 
 From `Software/telemetry`:
 
@@ -171,7 +183,7 @@ start_gui.bat
 
 The GUI opens maximized by default, connects to the broker, waits for `smartplug/telemetry/status`, and switches to the main dashboard once telemetry is received.
 
-## 10. Running the console MQTT client
+## 11. Running the console MQTT client
 
 From `Software/telemetry`:
 
