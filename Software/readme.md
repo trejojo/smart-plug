@@ -57,7 +57,7 @@ or:
 start_gui.bat
 ```
 
-The GUI opens maximized by default, connects to the configured MQTT broker and waits for `smartplug/telemetry/status`. Once telemetry is received, it switches to the main dashboard.
+The GUI opens maximized by default, connects to the configured MQTT broker and waits for `smartplug/telemetry/status`. Once telemetry is received, it switches to the main dashboard. If telemetry stops for more than 3 seconds, the GUI returns to the provisioning/reconnection screen using a local heartbeat watchdog. This intentionally does not depend on the MQTT disconnect callback, because the PC can remain connected to Mosquitto while the ESP32 is powered off, rebooting or in BLE pairing mode.
 
 ## 4. BLE provisioning
 
@@ -114,7 +114,7 @@ This corresponds to approximately:
 213.33 ms, or about 12.80 cycles at 60 Hz
 ```
 
-The GUI computes FFT, THD, phase angle and time shift locally from the received waveform samples.
+The GUI computes FFT, THD, phase angle and time shift locally from the received waveform samples. In `Both` mode, the instantaneous waveform and harmonic spectrum use independent voltage/current Y axes so V and A can be read correctly.
 
 ## 7. CSV export
 
@@ -137,6 +137,7 @@ Each export includes local save timestamps and, when available, the measurement/
 7. Test safety limits.
 8. Request waveform; the GUI should plot 512 samples and update FFT/THD/phase metrics.
 9. Test CSV export buttons.
+10. Power off or reset the ESP32; after about 3 seconds without telemetry, the GUI should return to the provisioning/reconnection screen.
 
 ## 9. Optional console testing
 
