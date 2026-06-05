@@ -8,7 +8,7 @@ Design goals:
     - Use the PC Mosquitto broker and the ESP32 MQTT firmware as the live data source.
     - Keep BLE provisioning available from the GUI using provisioning/provisioner.py.
     - Use one standardized MQTT topic contract for telemetry, state, commands, ACKs and waveform captures.
-    - Show waveform, harmonic spectrum and THD from a 512-sample ADE7953 capture at 6.99 kHz.
+    - Show waveform, harmonic spectrum, THD and phase information from a 512-sample ADE7953 capture at 2.4 kHz.
 
 Important FFT normalization note:
     For a coherent sine sampled over an integer number of cycles, the DFT bin
@@ -18,26 +18,25 @@ Important FFT normalization note:
     because the sqrt(2) factor cancels in the ratio.
 
     The GUI plots the first 20 harmonics in the compact spectrum view. The
-    FFT table includes all integer 60 Hz harmonics available below Nyquist for
-    Fs=6990 Hz.
+    FFT table includes all integer 60 Hz harmonics available up to Nyquist for
+    Fs=2400 Hz.
 """
 
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
 import queue
 import sys
-import random
 import threading
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 # Allow running this file directly from Software/telemetry while importing
 # Software/provisioning/provisioner.py.
@@ -89,8 +88,10 @@ APP_TITLE = "AYCE Smart Plug Dashboard"
 NOMINAL_VRMS = 127.0
 NOMINAL_FREQ_HZ = 60.0
 NOMINAL_CURRENT_ARMS = 5.0
-SAMPLE_RATE_HZ = DEFAULT_WAVEFORM_SAMPLE_RATE_HZ
-WAVEFORM_SAMPLE_COUNT = DEFAULT_WAVEFORM_SAMPLE_COUNT
+# GUI-side capture contract. Kept explicit here so the display, FFT and
+# CSV exports remain correct even if older MQTT defaults still exist elsewhere.
+SAMPLE_RATE_HZ = 2400
+WAVEFORM_SAMPLE_COUNT = 512
 WAVEFORM_CAPTURE_SECONDS = WAVEFORM_SAMPLE_COUNT / SAMPLE_RATE_HZ
 MAX_PLOT_HARMONIC_ORDER = 20
 MAX_TABLE_HARMONIC_ORDER = int((SAMPLE_RATE_HZ / 2.0) // NOMINAL_FREQ_HZ)
@@ -196,6 +197,8 @@ class WaveformPacket:
     thd_voltage: float
     thd_current: float
     harmonics: List[Dict[str, float]]
+    phase_angle_deg: float = 0.0   # Conventional phi = angle(V) - angle(I). Positive means current lags.
+    time_shift_s: float = 0.0      # Positive means current lags voltage in time.
 
 
 # =============================================================================
@@ -252,10 +255,7 @@ def dft_peak_amplitudes(
         return [0.0] * max_order
 
     amps: List[float] = []
-    centered = samples
-    # The waveform should be AC-centered, but subtracting a small DC offset makes
-    # the harmonic amplitudes more stable if a future packet includes bias.
-    mean = sum(centered) / n
+    mean = sum(samples) / n
 
     for order in range(1, max_order + 1):
         freq = order * fundamental_hz
@@ -265,20 +265,71 @@ def dft_peak_amplitudes(
         cos_sum = 0.0
         sin_sum = 0.0
         omega = 2.0 * math.pi * freq / sampling_rate_hz
-        for idx, raw in enumerate(centered):
+        for idx, raw in enumerate(samples):
             x = raw - mean
             angle = omega * idx
             cos_sum += x * math.cos(angle)
             sin_sum += x * math.sin(angle)
         magnitude = math.sqrt(cos_sum * cos_sum + sin_sum * sin_sum)
-        # Single-sided peak amplitude normalization. Do not double DC or an
-        # exact Nyquist component. For this project harmonics start at 60 Hz,
-        # but the Nyquist guard keeps the calculation valid if Fs changes later.
         if abs(freq - sampling_rate_hz / 2.0) < 1e-9:
             amps.append((1.0 / n) * magnitude)
         else:
             amps.append((2.0 / n) * magnitude)
     return amps
+
+
+def fundamental_sine_phase(samples: List[float], sampling_rate_hz: int, fundamental_hz: float) -> float:
+    """Return sine-reference phase in radians at the fundamental frequency.
+
+    For x(t)=A·sin(wt+theta), the direct DFT projections satisfy:
+        cos_sum ≈ N·A·sin(theta)/2
+        sin_sum ≈ N·A·cos(theta)/2
+    therefore theta = atan2(cos_sum, sin_sum).
+    """
+    n = len(samples)
+    if n <= 1 or sampling_rate_hz <= 0 or fundamental_hz <= 0:
+        return 0.0
+    mean = sum(samples) / n
+    omega = 2.0 * math.pi * fundamental_hz / sampling_rate_hz
+    cos_sum = 0.0
+    sin_sum = 0.0
+    for idx, raw in enumerate(samples):
+        x = raw - mean
+        angle = omega * idx
+        cos_sum += x * math.cos(angle)
+        sin_sum += x * math.sin(angle)
+    return math.atan2(cos_sum, sin_sum)
+
+
+def wrap_angle_rad(angle: float) -> float:
+    """Wrap angle to [-pi, pi)."""
+    while angle >= math.pi:
+        angle -= 2.0 * math.pi
+    while angle < -math.pi:
+        angle += 2.0 * math.pi
+    return angle
+
+
+def compute_phase_shift(
+    voltage_samples: List[float],
+    current_samples: List[float],
+    sampling_rate_hz: int,
+    fundamental_hz: float,
+) -> Tuple[float, float]:
+    """Compute conventional V-I displacement angle and time shift.
+
+    phi = angle(V) - angle(I). Positive phi means current lags voltage
+    (inductive tendency). Negative phi means current leads voltage
+    (capacitive tendency).
+    """
+    if not voltage_samples or not current_samples or sampling_rate_hz <= 0 or fundamental_hz <= 0:
+        return 0.0, 0.0
+    n = min(len(voltage_samples), len(current_samples))
+    v_phase = fundamental_sine_phase(voltage_samples[:n], sampling_rate_hz, fundamental_hz)
+    i_phase = fundamental_sine_phase(current_samples[:n], sampling_rate_hz, fundamental_hz)
+    phi = wrap_angle_rad(v_phase - i_phase)
+    time_shift_s = phi / (2.0 * math.pi * fundamental_hz)
+    return math.degrees(phi), time_shift_s
 
 
 def compute_thd_from_peak_amplitudes(amps: List[float]) -> float:
@@ -293,11 +344,12 @@ def compute_waveform_analysis(
     current_samples: List[float],
     sampling_rate_hz: int,
     fundamental_hz: float,
-) -> Tuple[float, float, List[Dict[str, float]]]:
+) -> Tuple[float, float, List[Dict[str, float]], float, float]:
     v_amps = dft_peak_amplitudes(voltage_samples, sampling_rate_hz, fundamental_hz)
     i_amps = dft_peak_amplitudes(current_samples, sampling_rate_hz, fundamental_hz)
     thd_v = compute_thd_from_peak_amplitudes(v_amps)
     thd_i = compute_thd_from_peak_amplitudes(i_amps)
+    phase_angle_deg, time_shift_s = compute_phase_shift(voltage_samples, current_samples, sampling_rate_hz, fundamental_hz)
 
     harmonics: List[Dict[str, float]] = []
     for order in range(1, MAX_TABLE_HARMONIC_ORDER + 1):
@@ -307,261 +359,33 @@ def compute_waveform_analysis(
             "voltage_mag_vpk": round(v_amps[order - 1], 5),
             "current_mag_apk": round(i_amps[order - 1], 7),
         })
-    return thd_v, thd_i, harmonics
+    return thd_v, thd_i, harmonics, phase_angle_deg, time_shift_s
 
 
-# =============================================================================
-# Dummy source: replace this class with MQTT later
-# =============================================================================
+def load_type_from_reactive_power(q_var: float, deadband: float = 1.0) -> str:
+    if q_var > deadband:
+        return "Inductive load"
+    if q_var < -deadband:
+        return "Capacitive load"
+    return "Mostly resistive load"
 
-class DummySmartPlugDataSource:
-    def __init__(self, out_queue: "queue.Queue[Tuple[str, str]]"):
-        self.out_queue = out_queue
-        self.running = False
-        self.thread: Optional[threading.Thread] = None
 
-        self.relay_state = True
-        self.system_locked = False
-        self.telemetry_paused = False
+def phase_note_from_angle(phase_angle_deg: float, deadband_deg: float = 2.0) -> str:
+    if phase_angle_deg > deadband_deg:
+        return "Current lags voltage. Inductive load."
+    if phase_angle_deg < -deadband_deg:
+        return "Current leads voltage. Capacitive load."
+    return "Voltage and current are nearly in phase. Mostly resistive load."
 
-        self.energy_wh = 0.0
-        self.temperature_c = 31.0
-        self.max_vrms = 135.0
-        self.max_iarms = 5.0
-        self.last_status: Optional[TelemetrySample] = None
-        self._last_energy_time = time.time()
 
-    def start(self) -> None:
-        self.running = True
-        self.thread = threading.Thread(target=self._run_loop, daemon=True)
-        self.thread.start()
-
-    def stop(self) -> None:
-        self.running = False
-
-    def _emit(self, topic: str, payload: Dict[str, Any]) -> None:
-        self.out_queue.put((topic, json.dumps(payload)))
-
-    def _run_loop(self) -> None:
-        while self.running:
-            if not self.telemetry_paused:
-                self._emit_status_packet()
-
-                if random.random() < 0.14:
-                    self._emit_temperature_packet()
-                if random.random() < 0.12:
-                    self._emit_energy_packet()
-
-                # Very low probability random protection for demo. Use header
-                # dev buttons if you want deterministic testing.
-                if random.random() < 0.006 and not self.system_locked:
-                    self.emit_critical_event(random.choice(["OVERCURRENT", "OVERVOLTAGE"]))
-
-            time.sleep(1.0)
-
-    def _emit_status_packet(self) -> None:
-        if self.relay_state:
-            vrms = random.gauss(NOMINAL_VRMS, 1.2)
-            irms = clamp(random.gauss(2.2, 0.85), 0.15, 5.25)
-            pf = clamp(random.gauss(0.93, 0.035), 0.78, 0.999)
-            freq = random.gauss(NOMINAL_FREQ_HZ, 0.035)
-            no_load = False
-        else:
-            vrms = random.gauss(NOMINAL_VRMS, 1.1)
-            irms = random.uniform(0.0, 0.035)
-            pf = 0.0
-            freq = random.gauss(NOMINAL_FREQ_HZ, 0.035)
-            no_load = True
-
-        apparent = vrms * irms
-        active_power = apparent * pf
-        reactive_power = math.sqrt(max(0.0, apparent * apparent - active_power * active_power))
-
-        now = time.time()
-        dt_hours = max(0.0, (now - self._last_energy_time) / 3600.0)
-        self._last_energy_time = now
-        self.energy_wh += active_power * dt_hours
-
-        self.temperature_c += random.gauss(0.0, 0.04)
-        self.temperature_c = clamp(self.temperature_c, 28.0, 44.0)
-
-        packet = {
-            "vrms": round(vrms, 2),
-            "irms": round(irms, 3),
-            "pf": round(pf, 3),
-            "active_power": round(active_power, 2),
-            "reactive_power": round(reactive_power, 2),
-            "frequency": round(freq, 3),
-            "no_load": no_load,
-            "energy_wh": round(self.energy_wh, 3),
-            "relay": self.relay_state,
-            "tmp_c": round(self.temperature_c, 2),
-            "timestamp": now_str(),
-        }
-        self.last_status = MessageParser.parse_telemetry(packet)
-        self._emit(TOPIC_STATUS, packet)
-
-    def _emit_temperature_packet(self) -> None:
-        self._emit(TOPIC_TEMPERATURE, {
-            "event_type": "TEMPERATURE",
-            "temperature_c": round(self.temperature_c, 2),
-            "timestamp": now_str(),
-        })
-
-    def _emit_energy_packet(self) -> None:
-        if self.last_status is None:
-            return
-        self._emit(TOPIC_ENERGY, {
-            "event_type": "ENERGY",
-            "vrms": round(self.last_status.vrms, 2),
-            "irms": round(self.last_status.irms, 3),
-            "active_power": round(self.last_status.active_power, 2),
-            "reactive_power": round(self.last_status.reactive_power, 2),
-            "energy_wh": round(self.energy_wh, 3),
-            "timestamp": now_str(),
-        })
-
-    def set_relay(self, turn_on: bool) -> None:
-        reason = "applied"
-        if turn_on and self.system_locked:
-            # This models the operational flow described by the user: the ADE7953
-            # interrupt opened the relay; the user manually checks the load and
-            # intentionally turns the relay on again to retry. If the problem is
-            # still present, another critical event will be emitted.
-            self.system_locked = False
-            reason = "manual_reclose_after_protection"
-
-        self.relay_state = bool(turn_on)
-        self._emit(TOPIC_RELAY, {
-            "event_type": "RELAY",
-            "relay": self.relay_state,
-            "accepted": True,
-            "reason": reason,
-            "timestamp": now_str(),
-        })
-
-    def set_safety_limits(self, max_vrms: float, max_iarms: float) -> None:
-        accepted = 80.0 <= max_vrms <= 160.0 and 0.1 <= max_iarms <= 10.0
-        reason = "applied" if accepted else "out_of_allowed_dummy_range"
-        if accepted:
-            self.max_vrms = max_vrms
-            self.max_iarms = max_iarms
-        self._emit(TOPIC_SAFETY_ACK, {
-            "event_type": "SAFETY_LIMITS_UPDATE",
-            "accepted": accepted,
-            "max_vrms": round(max_vrms, 2),
-            "max_iarms": round(max_iarms, 3),
-            "reason": reason,
-            "timestamp": now_str(),
-        })
-
-    def emit_critical_event(self, cause: str = "OVERVOLTAGE") -> None:
-        self.system_locked = True
-        self.relay_state = False
-        voltage = self.last_status.vrms if self.last_status else 142.0
-        current = self.last_status.irms if self.last_status else 6.2
-        if cause == "OVERVOLTAGE":
-            voltage = max(voltage, self.max_vrms + random.uniform(2.0, 9.0))
-        elif cause == "OVERCURRENT":
-            current = max(current, self.max_iarms + random.uniform(0.4, 2.0))
-
-        self._emit(TOPIC_EVENTS, {
-            "event_type": "CRITICAL_PROTECTION",
-            "cause": cause,
-            "timestamp": now_str(),
-            "data": {
-                "voltage_vrms": round(voltage, 2),
-                "current_a_arms": round(current, 3),
-                "current_b_arms": 0.0,
-                "duration_cycles": random.randint(2, 8),
-            },
-            "action_taken": "RELAY_OPEN",
-            "system_status": "LOCKED_AWAITING_USER_RETRY",
-        })
-        self._emit(TOPIC_RELAY, {
-            "event_type": "RELAY",
-            "relay": False,
-            "accepted": True,
-            "reason": "opened_by_ade7953_interrupt",
-            "timestamp": now_str(),
-        })
-
-    def request_waveform_capture(self) -> None:
-        if self.telemetry_paused:
-            return
-        self.telemetry_paused = True
-        self._emit_mqtt_command("REQUEST_WAVEFORM", {"sample_count": 512, "sampling_rate_hz": 6990})
-
-    def _waveform_capture_worker(self) -> None:
-        # The real ESP32/ADE path is expected to pause base telemetry while
-        # collecting 512 instantaneous samples at approximately 6.99 kHz.
-        time.sleep(WAVEFORM_CAPTURE_SECONDS)
-        packet = self._generate_waveform_packet()
-        self._emit(TOPIC_WAVEFORM_DATA, packet)
-        self.telemetry_paused = False
-
-    def _generate_waveform_packet(self) -> Dict[str, Any]:
-        n = WAVEFORM_SAMPLE_COUNT
-        freq = NOMINAL_FREQ_HZ
-        dt = 1.0 / SAMPLE_RATE_HZ
-
-        vrms = self.last_status.vrms if self.last_status else NOMINAL_VRMS
-        irms = self.last_status.irms if self.last_status else 2.0
-        pf = clamp(self.last_status.pf if self.last_status else 0.93, 0.1, 1.0)
-        phi = math.acos(pf)
-
-        v_peak = vrms * math.sqrt(2.0)
-        i_peak = irms * math.sqrt(2.0)
-
-        # Dummy harmonic content. Values are fractions of the fundamental peak.
-        # We include several odd harmonics; the analysis routine can estimate up
-        # to the 20th order.
-        v_harmonics = {
-            1: 1.0, 3: 0.025, 5: 0.018, 7: 0.012, 9: 0.006, 11: 0.004,
-            17: 0.0025, 23: 0.0018, 29: 0.0012, 35: 0.0009, 41: 0.0007
-        }
-        i_harmonics = {
-            1: 1.0, 3: 0.065, 5: 0.040, 7: 0.025, 9: 0.012, 11: 0.008,
-            13: 0.006, 17: 0.0045, 19: 0.0035, 23: 0.0026, 29: 0.0020,
-            37: 0.0013, 43: 0.0010, 53: 0.0007
-        }
-
-        voltage_samples: List[float] = []
-        current_samples: List[float] = []
-        for k in range(n):
-            t = k * dt
-            v = 0.0
-            i = 0.0
-            for order, frac in v_harmonics.items():
-                v += v_peak * frac * math.sin(2.0 * math.pi * freq * order * t)
-            for order, frac in i_harmonics.items():
-                phase = phi if order == 1 else phi + 0.2 * order
-                i += i_peak * frac * math.sin(2.0 * math.pi * freq * order * t - phase)
-            v += random.gauss(0.0, 0.25)
-            i += random.gauss(0.0, 0.006)
-            voltage_samples.append(round(v, 3))
-            current_samples.append(round(i, 5))
-
-        thd_v, thd_i, harmonics = compute_waveform_analysis(voltage_samples, current_samples, SAMPLE_RATE_HZ, freq)
-
-        return {
-            "event_type": "WAVEFORM_CAPTURE",
-            "timestamp": now_str(),
-            "sample_count": n,
-            "duration_s": round(n / SAMPLE_RATE_HZ, 6),
-            "sampling_rate_hz": SAMPLE_RATE_HZ,
-            "signals": {
-                "voltage_v": voltage_samples,
-                "current_a": current_samples,
-            },
-            "analysis": {
-                "fundamental_hz": freq,
-                "thd_voltage": round(thd_v, 5),
-                "thd_current": round(thd_i, 5),
-                "harmonics": harmonics,
-                "fft_normalization": "single_sided_peak_amplitude; internal bins use 2*abs(DFT_bin)/N",
-            },
-        }
+def displacement_metrics_from_pq(active_power_w: float, reactive_power_var: float) -> Tuple[float, float, float]:
+    """Return apparent power, displacement PF and phi angle from P and Q."""
+    p = safe_float(active_power_w)
+    q = safe_float(reactive_power_var)
+    s = math.sqrt(max(0.0, p * p + q * q))
+    disp_pf = abs(p) / s if s > 1e-12 else 0.0
+    phi_deg = math.degrees(math.atan2(q, p)) if (abs(p) > 1e-12 or abs(q) > 1e-12) else 0.0
+    return s, disp_pf, phi_deg
 
 
 # =============================================================================
@@ -662,7 +486,7 @@ class MqttSmartPlugDataSource:
 class MessageParser:
     @staticmethod
     def parse_telemetry(data: Dict[str, Any]) -> TelemetrySample:
-        return TelemetrySample(
+        sample = TelemetrySample(
             vrms=safe_float(data.get("vrms", data.get("voltage_vrms", data.get("voltage")))),
             irms=safe_float(data.get("irms", data.get("current_arms", data.get("current")))),
             pf=safe_float(data.get("pf", data.get("power_factor"))),
@@ -675,6 +499,17 @@ class MessageParser:
             tmp_c=safe_float(data.get("tmp_c", data.get("temperature_c"))),
             timestamp=str(data.get("timestamp", now_str())),
         )
+
+        # Keep the dashboard clean when firmware flags NO LOAD. The line voltage,
+        # frequency, relay state, temperature and accumulated energy may still be
+        # meaningful, but load-dependent quantities should not keep stale values.
+        if sample.no_load:
+            sample.irms = 0.0
+            sample.pf = 0.0
+            sample.active_power = 0.0
+            sample.reactive_power = 0.0
+
+        return sample
 
     @staticmethod
     def parse_event(data: Dict[str, Any]) -> CriticalEvent:
@@ -710,9 +545,11 @@ class MessageParser:
         sampling_rate = int(safe_float(data.get("sampling_rate_hz", data.get("fs_hz")), SAMPLE_RATE_HZ))
         fundamental = safe_float(analysis.get("fundamental_hz", data.get("fundamental_hz")), NOMINAL_FREQ_HZ)
 
-        # Recompute on the PC side from raw samples. This is deliberate: later the
-        # ESP32 can send only samples and the GUI can still produce FFT/THD.
-        thd_v, thd_i, harmonics = compute_waveform_analysis(voltage_samples, current_samples, sampling_rate, fundamental)
+        # Recompute on the PC side from raw samples. This keeps FFT, THD and phase
+        # display consistent even if the ESP32 sends samples only.
+        thd_v, thd_i, harmonics, phase_angle_deg, time_shift_s = compute_waveform_analysis(
+            voltage_samples, current_samples, sampling_rate, fundamental
+        )
 
         return WaveformPacket(
             timestamp=str(data.get("timestamp", now_str())),
@@ -724,6 +561,8 @@ class MessageParser:
             thd_voltage=thd_v,
             thd_current=thd_i,
             harmonics=harmonics,
+            phase_angle_deg=phase_angle_deg,
+            time_shift_s=time_shift_s,
         )
 
 
@@ -814,22 +653,41 @@ class HeaderBar(tk.Frame):
         self.app = app
         self.pack(fill="x", padx=18, pady=(9, 6))
 
-        title_box = tk.Frame(self, bg=Theme.BG)
-        title_box.pack(side="left", fill="x", expand=True)
-        tk.Label(title_box, text="AYCE Smart Plug", bg=Theme.BG, fg=Theme.TEXT,
-                 font=("Segoe UI", 22, "bold")).pack(anchor="w")
-        tk.Label(title_box, text="Live MQTT dashboard · BLE provisioning",
-                 bg=Theme.BG, fg=Theme.MUTED, font=("Segoe UI", 10)).pack(anchor="w")
-
         right = tk.Frame(self, bg=Theme.BG)
         right.pack(side="right", anchor="ne")
+
+        left = tk.Frame(self, bg=Theme.BG)
+        left.pack(side="left", fill="x", expand=True)
+
+        title_row = tk.Frame(left, bg=Theme.BG)
+        title_row.pack(anchor="w", fill="x")
+        tk.Label(title_row, text="AYCE Smart Plug", bg=Theme.BG, fg=Theme.TEXT,
+                 font=("Segoe UI", 22, "bold")).pack(side="left", anchor="w")
+        self.save_metrics_btn = tk.Button(
+            title_row, text="Save metrics CSV", bg=Theme.PANEL_2, fg=Theme.TEXT,
+            activebackground=Theme.CARD_HOVER, activeforeground=Theme.TEXT,
+            relief="flat", font=("Segoe UI", 9, "bold"), padx=10, pady=5,
+            command=app.save_metrics_csv,
+        )
+        self.save_metrics_btn.pack(side="left", padx=(18, 0), pady=(4, 0))
+
+        tk.Label(left, text="Live MQTT dashboard · BLE provisioning",
+                 bg=Theme.BG, fg=Theme.MUTED, font=("Segoe UI", 10)).pack(anchor="w")
+
         self.connection_badge = tk.Label(right, text="MQTT: DISCONNECTED", bg=Theme.PANEL_2,
                                          fg=Theme.BAD, font=("Segoe UI", 9, "bold"), padx=10, pady=5)
         self.connection_badge.pack(anchor="e")
-        self.phase_badge = tk.Label(right, text="PHASE: --", bg=Theme.PANEL_2, fg=Theme.MUTED,
+        self.phase_badge = tk.Label(right, text="MAIN DASHBOARD", bg=Theme.PANEL_2, fg=Theme.MUTED,
                                     font=("Segoe UI", 8, "bold"), padx=10, pady=4)
         self.phase_badge.pack(anchor="e", pady=(5, 0))
+        self.clock_label = tk.Label(right, text="--", bg=Theme.BG, fg=Theme.MUTED,
+                                    font=("Segoe UI", 9))
+        self.clock_label.pack(anchor="e", pady=(5, 0))
+        self._tick_clock()
 
+    def _tick_clock(self) -> None:
+        self.clock_label.configure(text=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        self.after(1000, self._tick_clock)
 
     def _dev_btn(self, parent: tk.Widget, text: str, command: Callable[[], None]) -> None:
         tk.Button(parent, text=text, bg=Theme.PANEL_2, fg=Theme.MUTED, activebackground=Theme.CARD_HOVER,
@@ -838,10 +696,10 @@ class HeaderBar(tk.Frame):
 
     def set_phase(self, phase: str) -> None:
         readable = {
-            PHASE_PROVISIONING: "PHASE: PROVISIONING / BLE",
-            PHASE_DASHBOARD: "PHASE: DASHBOARD",
-            PHASE_RECONNECTING: "PHASE: WAITING FOR MQTT",
-        }.get(phase, f"PHASE: {phase.upper()}")
+            PHASE_PROVISIONING: "PROVISIONING / BLE",
+            PHASE_DASHBOARD: "MAIN DASHBOARD",
+            PHASE_RECONNECTING: "WAITING FOR MQTT",
+        }.get(phase, phase.upper())
         self.phase_badge.configure(text=readable)
         if phase == PHASE_DASHBOARD:
             self.connection_badge.configure(text="MQTT: CONNECTED", fg=Theme.GOOD)
@@ -997,9 +855,6 @@ class DashboardFrame(tk.Frame):
 
         main = tk.Frame(self, bg=Theme.BG)
         main.pack(expand=True, fill="both", padx=18, pady=(2, 8))
-        # Two-column dashboard: left side for live controls,
-        # right side for the power triangle. The waveform panel spans both
-        # columns so the plots get the full dashboard width.
         main.grid_columnconfigure(0, weight=3, uniform="dashboard_cols")
         main.grid_columnconfigure(1, weight=2, uniform="dashboard_cols")
         main.grid_rowconfigure(0, weight=0)
@@ -1023,8 +878,6 @@ class DashboardFrame(tk.Frame):
 
         self.waveform_panel = WaveformAnalysisPanel(main, app)
         self.waveform_panel.grid(row=2, column=0, columnspan=2, sticky="nsew")
-        # No visible System Status panel in v10. Keep a null sink so future
-        # MQTT/debug hooks can still call status methods without changing the GUI.
         self.status_panel = NullStatusPanel()
 
     def _build_status_cards(self, parent: tk.Widget) -> None:
@@ -1035,12 +888,12 @@ class DashboardFrame(tk.Frame):
 
         self.card_v = Card(cards_frame, "Voltage", "--", "V RMS", f"Nominal: {NOMINAL_VRMS:.0f} V RMS", Theme.ACCENT)
         self.card_i = Card(cards_frame, "Current", "--", "A RMS", f"Nominal limit: {NOMINAL_CURRENT_ARMS:.0f} A RMS", Theme.PURPLE)
-        self.card_p = Card(cards_frame, "Active Power", "--", "W", "Real power", Theme.GOOD)
-        self.card_q = Card(cards_frame, "Reactive Power", "--", "var", "Quadrature power", Theme.WARN)
-        self.card_s = Card(cards_frame, "Apparent Power", "--", "VA", "√(P² + Q²)", Theme.ACCENT_2)
-        self.card_pf = Card(cards_frame, "Power Factor", "--", "", "cos φ", Theme.WARN)
+        self.card_p = Card(cards_frame, "Active Power", "--", "W", "Real power delivered", Theme.GOOD)
+        self.card_q = Card(cards_frame, "Reactive Power", "--", "var", "Reactive component", Theme.ACCENT)
+        self.card_s = Card(cards_frame, "Apparent Power", "--", "VA", "√(P² + Q²)", Theme.PURPLE)
+        self.card_pf = Card(cards_frame, "Power Factor", "--", "", "True PF, including THD", Theme.WARN)
         self.card_f = Card(cards_frame, "Frequency", "--", "Hz", "Mexico grid: 60 Hz", Theme.ACCENT_2)
-        self.card_e = Card(cards_frame, "Energy", "--", "Wh", "Accumulated", Theme.PINK)
+        self.card_e = Card(cards_frame, "Active Energy", "--", "Wh", "Accumulated", Theme.PINK)
         self.card_t = Card(cards_frame, "Temperature", "--", "°C", "Internal / board temperature", Theme.WARN)
         self.card_load = Card(cards_frame, "Load State", "--", "", "No-load detection", Theme.MUTED)
 
@@ -1056,13 +909,15 @@ class DashboardFrame(tk.Frame):
         v_accent = Theme.GOOD if 114 <= sample.vrms <= 140 else Theme.WARN
         i_accent = Theme.GOOD if sample.irms <= NOMINAL_CURRENT_ARMS else Theme.WARN
         pf_accent = Theme.GOOD if sample.pf >= 0.90 else Theme.WARN if sample.pf >= 0.75 else Theme.BAD
+        q_accent = Theme.WARN if sample.reactive_power > 1.0 else Theme.ACCENT if sample.reactive_power < -1.0 else Theme.SUBTLE
+        q_subtitle = "Inductive (positive)" if sample.reactive_power > 1.0 else "Capacitive (negative)" if sample.reactive_power < -1.0 else "Nearly resistive"
 
         self.card_v.set(f"{sample.vrms:.1f}", "V RMS", f"Δ vs 127 V: {sample.vrms - NOMINAL_VRMS:+.1f} V", v_accent)
         self.card_i.set(f"{sample.irms:.3f}", "A RMS", f"{sample.current_percent_nominal:.0f}% of 5 A RMS nominal", i_accent)
         self.card_p.set(f"{sample.active_power:.1f}", "W", "Real power delivered", Theme.GOOD)
-        self.card_q.set(f"{sample.reactive_power:.1f}", "var", "Reactive component", Theme.WARN)
-        self.card_s.set(f"{sample.apparent_power_va:.1f}", "VA", "Calculated as √(P² + Q²)", Theme.ACCENT_2)
-        self.card_pf.set(f"{sample.pf:.3f}", "", "High is better for real power transfer", pf_accent)
+        self.card_q.set(f"{sample.reactive_power:.1f}", "var", q_subtitle, q_accent)
+        self.card_s.set(f"{sample.apparent_power_va:.1f}", "VA", "Calculated as √(P² + Q²)", Theme.PURPLE)
+        self.card_pf.set(f"{sample.pf:.3f}", "", "True PF, including THD", pf_accent)
         self.card_f.set(f"{sample.frequency:.2f}", "Hz", f"Δ vs 60 Hz: {sample.frequency - NOMINAL_FREQ_HZ:+.2f} Hz")
 
         if sample.energy_wh >= 1000.0:
@@ -1221,36 +1076,40 @@ class SafetyLimitsPanel(tk.Frame):
 
 class PowerTrianglePanel(tk.Frame):
     def __init__(self, parent: tk.Widget):
-        super().__init__(parent, bg=Theme.PANEL, highlightbackground=Theme.BORDER, highlightthickness=1, padx=16, pady=14)
-        tk.Label(self, text="Power Triangle", bg=Theme.PANEL, fg=Theme.TEXT,
+        super().__init__(parent, bg=Theme.PANEL, highlightbackground=Theme.BORDER, highlightthickness=1, padx=16, pady=12)
+        header = tk.Frame(self, bg=Theme.PANEL)
+        header.pack(fill="x")
+        title_box = tk.Frame(header, bg=Theme.PANEL)
+        title_box.pack(side="left", fill="x", expand=True)
+        tk.Label(title_box, text="Power Triangle", bg=Theme.PANEL, fg=Theme.TEXT,
                  font=("Segoe UI", 16, "bold")).pack(anchor="w")
-        tk.Label(self, text="P, Q, S and power factor visualization", bg=Theme.PANEL,
-                 fg=Theme.MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
-        self.canvas = tk.Canvas(self, height=205, bg=Theme.PANEL, highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True)
+        tk.Label(title_box, text="P, Q, S and power factor visualization", bg=Theme.PANEL,
+                 fg=Theme.MUTED, font=("Segoe UI", 9)).pack(anchor="w")
+        self.load_badge = tk.Label(header, text="--", bg=Theme.PANEL_2, fg=Theme.MUTED,
+                                   font=("Segoe UI", 9, "bold"), padx=9, pady=4,
+                                   highlightbackground=Theme.BORDER, highlightthickness=1)
+        self.load_badge.pack(side="right", anchor="ne")
+
+        self.canvas = tk.Canvas(self, height=232, bg=Theme.PANEL, highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True, pady=(4, 0))
         self.summary = tk.Label(self, text="Waiting for telemetry…", bg=Theme.PANEL,
-                                fg=Theme.MUTED, font=("Segoe UI", 10), justify="left")
-        self.summary.pack(anchor="w", pady=(6, 0))
+                                fg=Theme.MUTED, font=("Segoe UI", 8), justify="left", anchor="w")
+        self.summary.pack(anchor="w", fill="x", pady=(5, 0))
+
         self._display_p: Optional[float] = None
         self._display_q: Optional[float] = None
-        self._display_pf: Optional[float] = None
         self._target_p: float = 0.0
         self._target_q: float = 0.0
-        self._target_pf: float = 0.0
         self._animation_active: bool = False
 
     def update_triangle(self, sample: TelemetrySample) -> None:
-        self._target_p = abs(sample.active_power)
-        self._target_q = abs(sample.reactive_power)
-        self._target_pf = (
-            clamp(self._target_p / math.sqrt(self._target_p * self._target_p + self._target_q * self._target_q), 0.0, 1.0)
-            if (self._target_p > 0 or self._target_q > 0)
-            else 0.0
-        )
+        self._target_p = sample.active_power
+        self._target_q = sample.reactive_power
+        load_type = load_type_from_reactive_power(sample.reactive_power)
+        self.load_badge.configure(text=load_type, fg=Theme.WARN if sample.reactive_power > 1.0 else Theme.ACCENT if sample.reactive_power < -1.0 else Theme.GOOD)
         if self._display_p is None:
             self._display_p = self._target_p
             self._display_q = self._target_q
-            self._display_pf = self._target_pf
             self._draw_triangle()
             return
         if not self._animation_active:
@@ -1258,95 +1117,81 @@ class PowerTrianglePanel(tk.Frame):
             self._animate_triangle()
 
     def _animate_triangle(self) -> None:
-        # Smooth visual transition between telemetry packets. Lower alpha makes
-        # the P-Q-S triangle change more gracefully without blocking the GUI.
         alpha = 0.11
         self._display_p = (self._display_p or 0.0) + alpha * (self._target_p - (self._display_p or 0.0))
         self._display_q = (self._display_q or 0.0) + alpha * (self._target_q - (self._display_q or 0.0))
-        self._display_pf = (self._display_pf or 0.0) + alpha * (self._target_pf - (self._display_pf or 0.0))
         self._draw_triangle()
-        err = max(
-            abs(self._target_p - (self._display_p or 0.0)),
-            abs(self._target_q - (self._display_q or 0.0)),
-            abs(self._target_pf - (self._display_pf or 0.0)) * 100.0,
-        )
+        err = max(abs(self._target_p - (self._display_p or 0.0)), abs(self._target_q - (self._display_q or 0.0)))
         if err > 0.35:
             self.after(35, self._animate_triangle)
         else:
             self._display_p = self._target_p
             self._display_q = self._target_q
-            self._display_pf = self._target_pf
             self._draw_triangle()
             self._animation_active = False
 
     def _draw_triangle(self) -> None:
         c = self.canvas
         c.delete("all")
-        w = max(360, c.winfo_width())
-        h = max(210, c.winfo_height())
-        origin_x = 48
-        base_y = h - 38
-        # Slightly reduced drawable width leaves room for the vertical Q label.
-        max_w = w - 150
-        max_h = h - 86
+        w = max(390, c.winfo_width())
+        h = max(230, c.winfo_height())
 
-        P = abs(self._display_p or 0.0)
-        Q = abs(self._display_q or 0.0)
-        pf_display = clamp(self._display_pf or 0.0, 0.0, 1.0)
-        S = max(math.sqrt(P * P + Q * Q), 1.0)
+        plot_top = 28
+        plot_bottom = h - 42
+        origin_x = 66
+        axis_right = w - 38
+        base_y = (plot_top + plot_bottom) / 2.0
+        axis_left = max(24, origin_x - 32)
 
-        if P <= 0.2 and Q <= 0.2:
-            scale = 1.0
-            p_px = 42
-            q_px = 0
-        else:
-            # The triangle must remain fully visible up to at least 650 W.
-            # Above ~600 W, reserve extra right-side margin instead of letting
-            # the P side use the whole canvas.
-            scale_candidates = [max_w / max(P, 1.0)]
-            if Q > 1.0:
-                scale_candidates.append(max_h / max(Q, 1.0))
-            if P >= 600.0:
-                scale_candidates.append((max_w * 0.92) / max(P, 1.0))
-            scale = min(scale_candidates)
-            p_px = min(max_w * 0.96, max(42, P * scale))
-            q_px = min(max_h, max(20, Q * scale)) if Q > 1 else 0
+        P = self._display_p if self._display_p is not None else 0.0
+        Q = self._display_q if self._display_q is not None else 0.0
+        abs_p = abs(P)
+        abs_q = abs(Q)
+        S, disp_pf, phi_deg = displacement_metrics_from_pq(P, Q)
+
+        drawable_w = max(100.0, axis_right - origin_x - 30)
+        drawable_h = max(60.0, min(base_y - plot_top, plot_bottom - base_y) - 12)
+        scale_candidates = [drawable_w / max(abs_p, 1.0)]
+        if abs_q > 1.0:
+            scale_candidates.append(drawable_h / max(abs_q, 1.0))
+        scale = min(scale_candidates)
+        p_px = max(42.0, min(drawable_w, abs_p * scale)) if abs_p > 0.2 else 42.0
+        q_px = min(drawable_h, abs_q * scale) if abs_q > 0.2 else 0.0
+        if abs_q > 1.0:
+            q_px = max(22.0, q_px)
 
         x2 = origin_x + p_px
-        y2 = base_y
-        x3 = x2
-        y3 = base_y - q_px
+        yq = base_y - q_px if Q >= 0 else base_y + q_px
 
-        c.create_line(origin_x - 10, base_y, w - 24, base_y, fill=Theme.BORDER, width=2)
-        c.create_line(origin_x, base_y + 10, origin_x, 24, fill=Theme.BORDER, width=2)
-        c.create_text(w - 28, base_y - 12, text="P", fill=Theme.GOOD, font=("Segoe UI", 10, "bold"))
-        c.create_text(origin_x + 16, 24, text="Q", fill=Theme.WARN, font=("Segoe UI", 10, "bold"))
+        # Axes centered on the active-power axis so Q can be positive or negative.
+        c.create_line(axis_left, base_y, axis_right, base_y, fill=Theme.BORDER, width=2, arrow="last")
+        c.create_line(origin_x, plot_bottom, origin_x, plot_top, fill=Theme.BORDER, width=2, arrow="last")
+        c.create_text(axis_right - 5, base_y - 14, text="P", fill=Theme.GOOD, font=("Segoe UI", 10, "bold"))
+        c.create_text(origin_x + 16, plot_top + 6, text="Q", fill=Theme.WARN, font=("Segoe UI", 10, "bold"))
+        c.create_text(origin_x + 18, plot_bottom - 6, text="-Q", fill=Theme.ACCENT, font=("Segoe UI", 10, "bold"))
 
-        c.create_polygon(origin_x, base_y, x2, y2, x3, y3, fill="#16243a", outline="")
-        c.create_line(origin_x, base_y, x2, y2, fill=Theme.GOOD, width=4)
-        c.create_line(x2, y2, x3, y3, fill=Theme.WARN, width=4)
-        c.create_line(origin_x, base_y, x3, y3, fill=Theme.ACCENT, width=4)
+        if abs_p <= 0.2 and abs_q <= 0.2:
+            c.create_text(w / 2, h / 2, text="Waiting for non-zero P/Q", fill=Theme.MUTED, font=("Segoe UI", 10, "bold"))
+        else:
+            c.create_polygon(origin_x, base_y, x2, base_y, x2, yq, fill="#16243a", outline="")
+            c.create_line(origin_x, base_y, x2, base_y, fill=Theme.GOOD, width=4, arrow="last")
+            c.create_line(x2, base_y, x2, yq, fill=Theme.ACCENT, width=4, arrow="last")
+            c.create_line(origin_x, base_y, x2, yq, fill=Theme.PURPLE, width=4, arrow="last")
 
-        c.create_text((origin_x + x2) / 2, base_y + 18, text=f"P={P:.1f} W", fill=Theme.GOOD,
-                      font=("Segoe UI", 9, "bold"))
+            c.create_text(min(axis_right - 115, x2 - 64), base_y - 18, text=f"P={P:.1f} W", fill=Theme.GOOD,
+                          font=("Segoe UI", 9, "bold"))
+            q_anchor = "w" if x2 < w - 120 else "e"
+            q_x = x2 + 20 if q_anchor == "w" else x2 - 8
+            c.create_text(q_x, (base_y + yq) / 2, anchor=q_anchor, text=f"Q={Q:.1f} var", fill=Theme.ACCENT,
+                          font=("Segoe UI", 9, "bold"))
 
-        q_text = f"Q={Q:.1f} var"
-        q_label_x = min(w - 34, x3 + 22)
-        c.create_text(q_label_x, (y2 + y3) / 2, angle=90, text=q_text, fill=Theme.WARN,
-                      font=("Segoe UI", 9, "bold"))
+            s_text = f"S={S:.1f} VA"
+            s_x = origin_x + 0.52 * (x2 - origin_x)
+            s_y = base_y + 0.52 * (yq - base_y)
+            c.create_rectangle(s_x - 46, s_y - 14, s_x + 46, s_y + 14, fill=Theme.PANEL, outline=Theme.PURPLE)
+            c.create_text(s_x, s_y, text=s_text, fill=Theme.PURPLE, font=("Segoe UI", 9, "bold"))
 
-        s_text = f"S≈{S:.1f} VA"
-        s_x = clamp((origin_x + x3) / 2 - 14, origin_x + 70, w - 110)
-        s_y = clamp((base_y + y3) / 2 - 24, 42, base_y - 30)
-        bbox_pad_x, bbox_pad_y = 6, 3
-        approx_w = 7 * len(s_text)
-        c.create_rectangle(s_x - approx_w/2 - bbox_pad_x, s_y - 9 - bbox_pad_y,
-                           s_x + approx_w/2 + bbox_pad_x, s_y + 9 + bbox_pad_y,
-                           fill=Theme.PANEL, outline=Theme.BORDER)
-        c.create_text(s_x, s_y, text=s_text, fill=Theme.ACCENT, font=("Segoe UI", 9, "bold"))
-
-        angle_deg = math.degrees(math.atan2(Q, P)) if (P > 0 or Q > 0) else 0.0
-        self.summary.configure(text=f"PF≈{pf_display:.3f} · φ≈{angle_deg:.1f}° · P={P:.1f} W · Q={Q:.1f} var · S≈{S:.1f} VA")
+        self.summary.configure(text=f"Displacement PF={disp_pf:.3f} · φ={phi_deg:+.1f}° · from P, Q, S only · ignores harmonic distortion")
 
 
 class MiniMetric(tk.Frame):
@@ -1370,7 +1215,7 @@ class WaveformAnalysisPanel(tk.Frame):
         super().__init__(parent, bg=Theme.PANEL, highlightbackground=Theme.BORDER, highlightthickness=1, padx=14, pady=10)
         self.app = app
         self.packet: Optional[WaveformPacket] = None
-        self.signal_var = tk.StringVar(value="Voltage")
+        self.signal_var = tk.StringVar(value="Both")
 
         header = tk.Frame(self, bg=Theme.PANEL)
         header.pack(fill="x")
@@ -1378,63 +1223,108 @@ class WaveformAnalysisPanel(tk.Frame):
                  font=("Segoe UI", 14, "bold")).pack(side="left")
         controls = tk.Frame(header, bg=Theme.PANEL)
         controls.pack(side="right")
-        tk.Label(controls, text="512 samples · ~73.25 ms", bg=Theme.PANEL, fg=Theme.MUTED,
+        tk.Label(controls, text=f"{WAVEFORM_SAMPLE_COUNT} samples · ~{1000.0 * WAVEFORM_CAPTURE_SECONDS:.2f} ms", bg=Theme.PANEL, fg=Theme.MUTED,
                  font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 8))
+        ttk.Combobox(controls, textvariable=self.signal_var, values=["Both", "Voltage", "Current"],
+                     state="readonly", width=10).pack(side="left", padx=(0, 8))
+        self.signal_var.trace_add("write", lambda *_: (self.draw_waveform(), self.draw_fft()))
         tk.Button(controls, text="Request waveform", bg=Theme.ACCENT, fg=Theme.BLACK,
                   activebackground=Theme.ACCENT_2, relief="flat", padx=10, pady=5,
                   font=("Segoe UI", 9, "bold"), command=self._request_waveform).pack(side="left")
 
-        self.status_label = tk.Label(self,
-            text="No waveform capture yet. Request one 512-sample capture to visualize instantaneous samples, harmonic content and THD.",
+        self.status_label = tk.Label(
+            self,
+            text="No waveform capture yet. Request one 512-sample capture to visualize instantaneous samples, harmonic content, THD and V-I phase.",
             bg=Theme.PANEL, fg=Theme.MUTED, font=("Segoe UI", 10), anchor="w", justify="left")
         self.status_label.pack(fill="x", pady=(4, 5))
 
         strip = tk.Frame(self, bg=Theme.PANEL)
-        strip.pack(fill="x", pady=(0, 6))
-        for col in range(4):
-            strip.grid_columnconfigure(col, weight=1)
+        strip.pack(fill="x", pady=(0, 4))
+        for col in range(6):
+            strip.grid_columnconfigure(col, weight=1, uniform="wave_metrics")
         self.thd_v_metric = MiniMetric(strip, "THD voltage", Theme.ACCENT)
         self.thd_i_metric = MiniMetric(strip, "THD current", Theme.PURPLE)
         self.samples_metric = MiniMetric(strip, "Samples", Theme.GOOD)
         self.fs_metric = MiniMetric(strip, "Sampling", Theme.WARN)
-        for idx, metric in enumerate([self.thd_v_metric, self.thd_i_metric, self.samples_metric, self.fs_metric]):
+        self.phase_metric = MiniMetric(strip, "Phase angle", Theme.ACCENT_2)
+        self.shift_metric = MiniMetric(strip, "Time shift", Theme.ACCENT_2)
+        metrics = [self.thd_v_metric, self.thd_i_metric, self.samples_metric, self.fs_metric, self.phase_metric, self.shift_metric]
+        for idx, metric in enumerate(metrics):
             metric.grid(row=0, column=idx, sticky="ew", padx=(0 if idx == 0 else 6, 0))
+
+        self.phase_note_label = tk.Label(self, text="ⓘ Waiting for V-I phase data.", bg=Theme.PANEL,
+                                         fg=Theme.MUTED, font=("Segoe UI", 9, "bold"), anchor="w")
+        self.phase_note_label.pack(fill="x", pady=(0, 5))
 
         body = tk.Frame(self, bg=Theme.PANEL)
         body.pack(expand=True, fill="both")
-        body.grid_columnconfigure(0, weight=3)
-        body.grid_columnconfigure(1, weight=2)
+        body.grid_columnconfigure(0, weight=1, uniform="analysis_cols")
+        body.grid_columnconfigure(1, weight=1, uniform="analysis_cols")
         body.grid_rowconfigure(0, weight=1)
 
         wave_box = tk.Frame(body, bg=Theme.CARD, highlightbackground=Theme.BORDER, highlightthickness=1)
-        wave_box.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        wave_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         wave_box.grid_columnconfigure(0, weight=1)
         wave_box.grid_rowconfigure(1, weight=1)
 
         wave_header = tk.Frame(wave_box, bg=Theme.CARD)
         wave_header.grid(row=0, column=0, sticky="ew", padx=10, pady=(6, 1))
-        tk.Label(wave_header, text="Instantaneous waveform", bg=Theme.CARD, fg=Theme.TEXT,
-                 font=("Segoe UI", 10, "bold")).pack(side="left")
-        ttk.Combobox(wave_header, textvariable=self.signal_var, values=["Voltage", "Current"],
-                     state="readonly", width=10).pack(side="right")
-        self.signal_var.trace_add("write", lambda *_: (self.draw_waveform(), self.draw_fft()))
-
+        self.wave_title_label = tk.Label(wave_header, text="Instantaneous waveform (Both)", bg=Theme.CARD, fg=Theme.TEXT,
+                                         font=("Segoe UI", 10, "bold"))
+        self.wave_title_label.pack(side="left")
+        self.wave_legend = self._build_signal_legend(wave_header, voltage_unit="[V]", current_unit="[A]")
+        self.wave_legend.pack(side="left", padx=(18, 0))
+        tk.Button(wave_header, text="Sample table", bg=Theme.PANEL_2, fg=Theme.TEXT,
+                  activebackground=Theme.BORDER, relief="flat", padx=8, pady=2,
+                  font=("Segoe UI", 8, "bold"), command=self.show_sample_table).pack(side="right")
         self.wave_canvas = tk.Canvas(wave_box, bg=Theme.CARD, highlightthickness=0, height=230)
         self.wave_canvas.grid(row=1, column=0, sticky="nsew", padx=8, pady=(4, 6))
 
         fft_box = tk.Frame(body, bg=Theme.CARD, highlightbackground=Theme.BORDER, highlightthickness=1)
-        fft_box.grid(row=0, column=1, sticky="nsew")
+        fft_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        fft_box.grid_columnconfigure(0, weight=1)
+        fft_box.grid_rowconfigure(1, weight=1)
         fft_header = tk.Frame(fft_box, bg=Theme.CARD)
-        fft_header.pack(fill="x", padx=10, pady=(6, 1))
-        tk.Label(fft_header, text="Harmonic spectrum / FFT", bg=Theme.CARD, fg=Theme.TEXT,
-                 font=("Segoe UI", 10, "bold")).pack(side="left")
+        fft_header.grid(row=0, column=0, sticky="ew", padx=10, pady=(6, 1))
+        self.fft_title_label = tk.Label(fft_header, text="Harmonic spectrum / FFT (Both)", bg=Theme.CARD, fg=Theme.TEXT,
+                                        font=("Segoe UI", 10, "bold"))
+        self.fft_title_label.pack(side="left")
+        self.fft_legend = self._build_signal_legend(fft_header, voltage_unit="[Vpk]", current_unit="[Apk]")
+        self.fft_legend.pack(side="left", padx=(18, 0))
         tk.Button(fft_header, text="FFT table", bg=Theme.PANEL_2, fg=Theme.TEXT,
                   activebackground=Theme.BORDER, relief="flat", padx=8, pady=2,
                   font=("Segoe UI", 8, "bold"), command=self.show_fft_table).pack(side="right")
         self.fft_canvas = tk.Canvas(fft_box, bg=Theme.CARD, highlightthickness=0, height=230)
-        self.fft_canvas.pack(fill="both", expand=True, padx=8, pady=(2, 6))
+        self.fft_canvas.grid(row=1, column=0, sticky="nsew", padx=8, pady=(2, 6))
 
         self.after(500, self._draw_placeholders)
+
+    def _build_signal_legend(self, parent: tk.Widget, voltage_unit: str, current_unit: str) -> tk.Frame:
+        legend = tk.Frame(parent, bg=Theme.CARD)
+        legend.voltage_label = tk.Label(legend, text=f"━ Voltage {voltage_unit}", bg=Theme.CARD,
+                                        fg=Theme.ACCENT, font=("Segoe UI", 8, "bold"))
+        legend.current_label = tk.Label(legend, text=f"━ Current {current_unit}", bg=Theme.CARD,
+                                        fg=Theme.PURPLE, font=("Segoe UI", 8, "bold"))
+        legend.voltage_label.pack(side="left")
+        legend.current_label.pack(side="left", padx=(12, 0))
+        return legend
+
+    def _update_signal_legend(self, legend: tk.Frame, mode: str) -> None:
+        # Each label keeps its own foreground color. Do not collapse this into a
+        # single tk.Label, otherwise Voltage and Current render with one color.
+        voltage_label = getattr(legend, "voltage_label", None)
+        current_label = getattr(legend, "current_label", None)
+        if voltage_label is None or current_label is None:
+            return
+        if mode == "Voltage":
+            voltage_label.pack(side="left")
+            current_label.pack_forget()
+        elif mode == "Current":
+            voltage_label.pack_forget()
+            current_label.pack(side="left")
+        else:
+            voltage_label.pack(side="left")
+            current_label.pack(side="left", padx=(12, 0))
 
     def _request_waveform(self) -> None:
         self.app.publish_waveform_request()
@@ -1449,6 +1339,8 @@ class WaveformAnalysisPanel(tk.Frame):
             self.thd_i_metric.set("--")
             self.samples_metric.set("--")
             self.fs_metric.set(f"{SAMPLE_RATE_HZ} Hz")
+            self.phase_metric.set("--")
+            self.shift_metric.set("--")
 
     def _center_text(self, canvas: tk.Canvas, text: str) -> None:
         w = max(260, canvas.winfo_width())
@@ -1456,26 +1348,20 @@ class WaveformAnalysisPanel(tk.Frame):
         pad_x = min(38, max(22, int(w * 0.08)))
         pad_y = min(28, max(18, int(h * 0.16)))
         canvas.create_rectangle(pad_x, pad_y, w - pad_x, h - pad_y, outline=Theme.BORDER, dash=(4, 4))
-        canvas.create_text(
-            w / 2,
-            h / 2,
-            text=text,
-            fill=Theme.MUTED,
-            font=("Segoe UI", 10, "bold"),
-            justify="center",
-            width=max(120, w - 2 * pad_x - 18),
-        )
+        canvas.create_text(w / 2, h / 2, text=text, fill=Theme.MUTED,
+                           font=("Segoe UI", 10, "bold"), justify="center",
+                           width=max(120, w - 2 * pad_x - 18))
 
     def set_collecting(self, collecting: bool, duration_s: float = 0.0) -> None:
         if collecting:
-            self.status_label.configure(text="Collecting 512 instantaneous samples at 6.99 kHz… Base telemetry is temporarily paused.", fg=Theme.WARN)
+            self.status_label.configure(text=f"Collecting {WAVEFORM_SAMPLE_COUNT} instantaneous samples at {SAMPLE_RATE_HZ} Hz… Base telemetry is temporarily paused.", fg=Theme.WARN)
         else:
             if self.packet is None:
-                self.status_label.configure(text="No waveform capture yet. Request one 512-sample capture to visualize instantaneous samples, harmonic content and THD.", fg=Theme.MUTED)
+                self.status_label.configure(text="No waveform capture yet. Request one 512-sample capture to visualize instantaneous samples, harmonic content, THD and V-I phase.", fg=Theme.MUTED)
             else:
                 ms = 1000.0 * self.packet.duration_s
                 cycles = self.packet.duration_s * self.packet.fundamental_hz
-                self.status_label.configure(text=f"Waveform capture received: 512 samples · {ms:.2f} ms · ~{cycles:.2f} cycles at 60 Hz.", fg=Theme.GOOD)
+                self.status_label.configure(text=f"Waveform capture received: {len(self.packet.voltage_samples)} samples · {ms:.2f} ms · ~{cycles:.2f} cycles at {self.packet.fundamental_hz:.0f} Hz.", fg=Theme.GOOD)
 
     def update_packet(self, packet: WaveformPacket) -> None:
         self.packet = packet
@@ -1484,48 +1370,43 @@ class WaveformAnalysisPanel(tk.Frame):
         self.thd_i_metric.set(f"{100.0 * packet.thd_current:.2f} %")
         self.samples_metric.set(f"{len(packet.voltage_samples):,}")
         self.fs_metric.set(f"{packet.sampling_rate_hz} Hz")
+        self.phase_metric.set(f"{packet.phase_angle_deg:+.1f} °")
+        self.shift_metric.set(f"{1000.0 * packet.time_shift_s:+.2f} ms")
+        self.phase_note_label.configure(text="ⓘ " + phase_note_from_angle(packet.phase_angle_deg), fg=Theme.ACCENT)
         self.draw_waveform()
         self.draw_fft()
 
+    def _update_titles(self) -> None:
+        mode = self.signal_var.get()
+        self.wave_title_label.configure(text=f"Instantaneous waveform ({mode})")
+        self.fft_title_label.configure(text=f"Harmonic spectrum / FFT ({mode})")
+        self._update_signal_legend(self.wave_legend, mode)
+        self._update_signal_legend(self.fft_legend, mode)
+
     def draw_waveform(self) -> None:
+        self._update_titles()
         c = self.wave_canvas
         c.delete("all")
         if self.packet is None:
             self._center_text(c, "Waiting for waveform capture")
             return
-        signal_name = self.signal_var.get()
-        samples = self.packet.voltage_samples if signal_name == "Voltage" else self.packet.current_samples
-        unit = "V" if signal_name == "Voltage" else "A"
-        accent = Theme.ACCENT if signal_name == "Voltage" else Theme.PURPLE
-        if not samples:
+        mode = self.signal_var.get()
+        if not self.packet.voltage_samples and not self.packet.current_samples:
             self._center_text(c, "No samples available")
             return
 
         w = max(320, c.winfo_width())
         h = max(200, c.winfo_height())
-        # Extra bottom padding is intentional: it leaves room for time ticks and
-        # prevents the lower part of the sine wave / axis labels from being clipped.
-        pad_l, pad_r, pad_t, pad_b = 78, 20, 24, 52
+        pad_l, pad_r, pad_t, pad_b = 72, 62 if mode == "Both" else 22, 24, 52
         plot_w = max(20, w - pad_l - pad_r)
         plot_h = max(40, h - pad_t - pad_b)
-        start = 0
-        end = len(samples)
-        view = samples
-        if len(view) < 2:
+        n = min(len(self.packet.voltage_samples), len(self.packet.current_samples)) if mode == "Both" else len(self.packet.voltage_samples if mode == "Voltage" else self.packet.current_samples)
+        if n < 2:
             return
-        ymin, ymax = min(view), max(view)
-        margin = 0.10 * max(1e-9, ymax - ymin)
-        ymin -= margin
-        ymax += margin
-        span = max(1e-9, ymax - ymin)
-        y_zero = pad_t + plot_h - ((0.0 - ymin) / span) * plot_h if ymin <= 0.0 <= ymax else pad_t + plot_h / 2
+        t0 = 0.0
+        t1 = (n - 1) / self.packet.sampling_rate_hz
 
         c.create_rectangle(pad_l, pad_t, pad_l + plot_w, pad_t + plot_h, outline=Theme.BORDER)
-        c.create_line(pad_l, y_zero, pad_l + plot_w, y_zero, fill=Theme.BORDER, dash=(3, 3))
-
-        t0 = start / self.packet.sampling_rate_hz
-        t1 = end / self.packet.sampling_rate_hz
-        # Time grid and tick labels in seconds.
         tick_count = 6
         for i in range(tick_count):
             frac = i / (tick_count - 1)
@@ -1534,90 +1415,209 @@ class WaveformAnalysisPanel(tk.Frame):
             c.create_line(x, pad_t, x, pad_t + plot_h, fill="#24324a")
             c.create_line(x, pad_t + plot_h, x, pad_t + plot_h + 5, fill=Theme.MUTED)
             c.create_text(x, pad_t + plot_h + 17, text=f"{tick_t:.3f}", fill=Theme.MUTED, font=("Segoe UI", 7))
-        y_tick_count = 5
-        for i in range(y_tick_count):
-            frac = i / (y_tick_count - 1)
-            y = pad_t + frac * plot_h
-            value = ymax - frac * span
-            c.create_line(pad_l, y, pad_l + plot_w, y, fill="#24324a")
-            c.create_line(pad_l - 5, y, pad_l, y, fill=Theme.MUTED)
-            c.create_text(pad_l - 8, y, anchor="e", text=f"{value:.2f}", fill=Theme.MUTED, font=("Segoe UI", 7))
 
-        points: List[float] = []
-        for idx, value in enumerate(view):
-            x = pad_l + (idx / (len(view) - 1)) * plot_w
-            y = pad_t + plot_h - ((value - ymin) / span) * plot_h
-            points.extend([x, y])
-        if len(points) >= 4:
-            c.create_line(points, fill=accent, width=2, smooth=True)
+        def y_bounds(samples: List[float]) -> Tuple[float, float]:
+            ymin, ymax = min(samples), max(samples)
+            margin = 0.10 * max(1e-9, ymax - ymin)
+            return ymin - margin, ymax + margin
 
-        c.create_text(pad_l + plot_w / 2, h - 10, text="time [s]", fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
-        c.create_text(18, pad_t + plot_h / 2, text=f"{unit}", angle=90, fill=accent, font=("Segoe UI", 8, "bold"))
-        c.create_text(pad_l, 10, anchor="w", text=f"{signal_name} instantaneous [{unit}]", fill=accent, font=("Segoe UI", 9, "bold"))
-        c.create_text(pad_l + plot_w, 10, anchor="e", text=f"Fs={self.packet.sampling_rate_hz} Hz", fill=Theme.MUTED, font=("Segoe UI", 8))
-        # Y-axis tick labels are drawn in the grid loop above.
+        def draw_y_axis(samples: List[float], side: str, unit_label: str, color: str) -> Tuple[float, float]:
+            ymin, ymax = y_bounds(samples)
+            span = max(1e-9, ymax - ymin)
+            for i in range(5):
+                frac = i / 4
+                y = pad_t + frac * plot_h
+                value = ymax - frac * span
+                c.create_line(pad_l, y, pad_l + plot_w, y, fill="#24324a")
+                if side == "left":
+                    c.create_line(pad_l - 5, y, pad_l, y, fill=Theme.MUTED)
+                    c.create_text(pad_l - 8, y, anchor="e", text=f"{value:.2f}", fill=color, font=("Segoe UI", 7))
+                else:
+                    x_axis = pad_l + plot_w
+                    c.create_line(x_axis, y, x_axis + 5, y, fill=Theme.MUTED)
+                    c.create_text(x_axis + 8, y, anchor="w", text=f"{value:.2f}", fill=color, font=("Segoe UI", 7))
+            if side == "left":
+                c.create_text(18, pad_t + plot_h / 2, text=unit_label, angle=90, fill=color, font=("Segoe UI", 8, "bold"))
+            else:
+                c.create_text(w - 16, pad_t + plot_h / 2, text=unit_label, angle=90, fill=color, font=("Segoe UI", 8, "bold"))
+            return ymin, ymax
+
+        def draw_trace(samples: List[float], ymin: float, ymax: float, color: str) -> None:
+            span = max(1e-9, ymax - ymin)
+            view = samples[:n]
+            points: List[float] = []
+            for idx, value in enumerate(view):
+                x = pad_l + (idx / (n - 1)) * plot_w
+                y = pad_t + plot_h - ((value - ymin) / span) * plot_h
+                points.extend([x, y])
+            if len(points) >= 4:
+                c.create_line(points, fill=color, width=2, smooth=True)
+
+        if mode == "Both":
+            v = self.packet.voltage_samples[:n]
+            i = self.packet.current_samples[:n]
+            v_min, v_max = draw_y_axis(v, "left", "Voltage [V]", Theme.ACCENT)
+            i_min, i_max = draw_y_axis(i, "right", "Current [A]", Theme.PURPLE)
+            # Zero reference for voltage axis.
+            if v_min <= 0.0 <= v_max:
+                y_zero = pad_t + plot_h - ((0.0 - v_min) / (v_max - v_min)) * plot_h
+                c.create_line(pad_l, y_zero, pad_l + plot_w, y_zero, fill=Theme.BORDER, dash=(3, 3))
+            draw_trace(v, v_min, v_max, Theme.ACCENT)
+            draw_trace(i, i_min, i_max, Theme.PURPLE)
+        else:
+            samples = self.packet.voltage_samples if mode == "Voltage" else self.packet.current_samples
+            unit_label = "Voltage [V]" if mode == "Voltage" else "Current [A]"
+            color = Theme.ACCENT if mode == "Voltage" else Theme.PURPLE
+            ymin, ymax = draw_y_axis(samples[:n], "left", unit_label, color)
+            if ymin <= 0.0 <= ymax:
+                y_zero = pad_t + plot_h - ((0.0 - ymin) / (ymax - ymin)) * plot_h
+                c.create_line(pad_l, y_zero, pad_l + plot_w, y_zero, fill=Theme.BORDER, dash=(3, 3))
+            draw_trace(samples[:n], ymin, ymax, color)
+
+        c.create_text(pad_l + plot_w / 2, h - 10, text="Time [s]", fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
 
     def draw_fft(self) -> None:
+        self._update_titles()
         c = self.fft_canvas
         c.delete("all")
         if self.packet is None:
             self._center_text(c, "FFT preview will appear here")
             return
-        signal_name = self.signal_var.get()
-        key = "voltage_mag_vpk" if signal_name == "Voltage" else "current_mag_apk"
-        unit = "Vpk" if signal_name == "Voltage" else "Apk"
-        accent = Theme.ACCENT if signal_name == "Voltage" else Theme.PURPLE
+        mode = self.signal_var.get()
         harmonics = self.packet.harmonics[:MAX_PLOT_HARMONIC_ORDER]
-        values = [safe_float(h.get(key)) for h in harmonics]
-        freqs = [int(round(safe_float(h.get("frequency_hz", (idx + 1) * NOMINAL_FREQ_HZ)))) for idx, h in enumerate(harmonics)]
-        max_val = max(max(values) if values else 1.0, 1e-9)
+        if not harmonics:
+            self._center_text(c, "No FFT data available")
+            return
 
-        w = max(260, c.winfo_width())
+        w = max(320, c.winfo_width())
         h = max(200, c.winfo_height())
-        # More bottom padding so the x-axis can show actual harmonic frequencies.
         pad_l, pad_r, pad_t, pad_b = 70, 18, 24, 58
         plot_w = max(20, w - pad_l - pad_r)
         plot_h = max(40, h - pad_t - pad_b)
+
+        v_values = [safe_float(h.get("voltage_mag_vpk")) for h in harmonics]
+        i_values = [safe_float(h.get("current_mag_apk")) for h in harmonics]
+        if mode == "Voltage":
+            max_val = max(max(v_values), 1e-9)
+        elif mode == "Current":
+            max_val = max(max(i_values), 1e-9)
+        else:
+            max_val = max(max(v_values), max(i_values), 1e-9)
+        freqs = [int(round(safe_float(h.get("frequency_hz", (idx + 1) * NOMINAL_FREQ_HZ)))) for idx, h in enumerate(harmonics)]
+
         c.create_rectangle(pad_l, pad_t, pad_l + plot_w, pad_t + plot_h, outline=Theme.BORDER)
-        y_tick_count = 5
-        for i in range(y_tick_count):
-            frac = i / (y_tick_count - 1)
+        for j in range(5):
+            frac = j / 4
             y = pad_t + frac * plot_h
             value = max_val * (1.0 - frac)
             c.create_line(pad_l, y, pad_l + plot_w, y, fill="#24324a")
             c.create_line(pad_l - 5, y, pad_l, y, fill=Theme.MUTED)
             c.create_text(pad_l - 8, y, anchor="e", text=f"{value:.2f}", fill=Theme.MUTED, font=("Segoe UI", 7))
 
-        bar_gap = 2
-        bar_w = max(3, (plot_w / max(1, len(values))) - bar_gap)
-        for idx, val in enumerate(values):
-            x0 = pad_l + idx * (bar_w + bar_gap) + 2
-            x1 = x0 + bar_w
-            y1 = pad_t + plot_h
-            y0 = y1 - (val / max_val) * plot_h
-            c.create_rectangle(x0, y0, x1, y1, fill=accent if idx == 0 else Theme.WARN, outline="")
-            freq = freqs[idx] if idx < len(freqs) else int((idx + 1) * NOMINAL_FREQ_HZ)
-            label_x = (x0 + x1) / 2
-            # Label every bar with frequency [Hz]. Rotating keeps the axis readable.
-            c.create_text(label_x, pad_t + plot_h + 22, text=str(freq), angle=90,
+        group_count = max(1, len(harmonics))
+        group_w = plot_w / group_count
+        for idx in range(group_count):
+            x_group = pad_l + idx * group_w
+            if mode == "Both":
+                bar_w = max(2, group_w * 0.32)
+                vals = [(v_values[idx], Theme.ACCENT, x_group + group_w * 0.18), (i_values[idx], Theme.PURPLE, x_group + group_w * 0.52)]
+            elif mode == "Voltage":
+                bar_w = max(3, group_w * 0.52)
+                vals = [(v_values[idx], Theme.ACCENT, x_group + group_w * 0.24)]
+            else:
+                bar_w = max(3, group_w * 0.52)
+                vals = [(i_values[idx], Theme.PURPLE, x_group + group_w * 0.24)]
+            for val, color, x0 in vals:
+                x1 = x0 + bar_w
+                y1 = pad_t + plot_h
+                y0 = y1 - (val / max_val) * plot_h
+                c.create_rectangle(x0, y0, x1, y1, fill=color, outline="")
+            label_x = x_group + group_w / 2
+            c.create_text(label_x, pad_t + plot_h + 20, text=str(freqs[idx]), angle=90,
                           fill=Theme.MUTED, font=("Segoe UI", 7, "bold"))
 
-        c.create_text(pad_l, 10, anchor="w", text=f"FFT amplitude [{unit}]", fill=accent, font=("Segoe UI", 8, "bold"))
-        # Y-axis tick labels are drawn in the grid loop above.
-        c.create_text(18, pad_t + plot_h / 2, text=unit, angle=90, fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
-        c.create_text(pad_l + plot_w / 2, h - 8, text="Frequency [Hz]", fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
+        c.create_text(pad_l, 10, anchor="w", text="Magnitude (pk)", fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
+        c.create_text(18, pad_t + plot_h / 2, text="Magnitude", angle=90, fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
+        c.create_text(pad_l + plot_w / 2, h - 8, text="Frequency [Hz] / Harmonic order", fill=Theme.MUTED, font=("Segoe UI", 8, "bold"))
 
+    def show_sample_table(self) -> None:
+        if self.packet is None:
+            messagebox.showinfo("Sample table", "Request a waveform capture first to populate the sample table.")
+            return
+        win = tk.Toplevel(self)
+        win.title("AYCE Smart Plug · Instantaneous Sample Table")
+        win.geometry("720x540")
+        win.configure(bg=Theme.BG)
+        win.transient(self.winfo_toplevel())
 
+        header = tk.Frame(win, bg=Theme.BG)
+        header.pack(fill="x", padx=14, pady=(12, 6))
+        tk.Label(header, text="Instantaneous Sample Table", bg=Theme.BG, fg=Theme.TEXT,
+                 font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        tk.Label(header, text=f"Capture timestamp: {self.packet.timestamp} · Fs={self.packet.sampling_rate_hz} Hz · {len(self.packet.voltage_samples)} samples",
+                 bg=Theme.BG, fg=Theme.MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
+
+        table_frame = tk.Frame(win, bg=Theme.BG)
+        table_frame.pack(expand=True, fill="both", padx=14, pady=8)
+        columns = ("idx", "time", "v", "i")
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=18)
+        tree.heading("idx", text="Sample")
+        tree.heading("time", text="Time [s]")
+        tree.heading("v", text="Voltage [V]")
+        tree.heading("i", text="Current [A]")
+        tree.column("idx", width=90, anchor="center")
+        tree.column("time", width=140, anchor="e")
+        tree.column("v", width=150, anchor="e")
+        tree.column("i", width=150, anchor="e")
+        scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", expand=True, fill="both")
+        scroll.pack(side="right", fill="y")
+
+        n = min(len(self.packet.voltage_samples), len(self.packet.current_samples))
+        for idx in range(n):
+            t = idx / self.packet.sampling_rate_hz if self.packet.sampling_rate_hz else 0.0
+            tree.insert("", "end", values=(idx, f"{t:.6f}", f"{self.packet.voltage_samples[idx]:.5f}", f"{self.packet.current_samples[idx]:.7f}"))
+
+        footer = tk.Frame(win, bg=Theme.BG)
+        footer.pack(fill="x", padx=14, pady=(0, 12))
+        tk.Button(footer, text="Save CSV", bg=Theme.ACCENT, fg=Theme.BLACK,
+                  activebackground=Theme.ACCENT_2, relief="flat", padx=12, pady=4,
+                  command=self.save_sample_csv).pack(side="left")
+        tk.Button(footer, text="Close", bg=Theme.PANEL_2, fg=Theme.TEXT,
+                  activebackground=Theme.BORDER, relief="flat", padx=12, pady=4,
+                  command=win.destroy).pack(side="right")
+
+    def save_sample_csv(self) -> None:
+        if self.packet is None:
+            messagebox.showinfo("Save CSV", "No waveform capture available yet.")
+            return
+        filename = filedialog.asksaveasfilename(
+            title="Save sample table CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile="smartplug_samples.csv",
+        )
+        if not filename:
+            return
+        save_ts = now_str()
+        n = min(len(self.packet.voltage_samples), len(self.packet.current_samples))
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["capture_timestamp", "save_timestamp", "sample_index", "time_s", "voltage_v", "current_a"])
+            for idx in range(n):
+                t = idx / self.packet.sampling_rate_hz if self.packet.sampling_rate_hz else 0.0
+                writer.writerow([self.packet.timestamp, save_ts, idx, f"{t:.9f}", self.packet.voltage_samples[idx], self.packet.current_samples[idx]])
+        messagebox.showinfo("Save CSV", f"Sample table saved:\n{filename}")
 
     def show_fft_table(self) -> None:
-        """Open a compact harmonic table with normalized peak amplitudes."""
         if self.packet is None:
             messagebox.showinfo("FFT table", "Request a waveform capture first to populate the harmonic table.")
             return
 
         win = tk.Toplevel(self)
         win.title("AYCE Smart Plug · FFT Harmonic Table")
-        win.geometry("620x520")
+        win.geometry("680x540")
         win.configure(bg=Theme.BG)
         win.transient(self.winfo_toplevel())
 
@@ -1628,13 +1628,12 @@ class WaveformAnalysisPanel(tk.Frame):
         tk.Label(header,
                  text=("Peak amplitudes normalized as 2·|DFT bin|/N. "
                        "THD is computed from harmonics relative to the 60 Hz fundamental. "
-                       "Table includes all integer 60 Hz harmonics below Nyquist."),
+                       "Table includes all integer 60 Hz harmonics up to Nyquist."),
                  bg=Theme.BG, fg=Theme.MUTED, font=("Segoe UI", 9),
-                 wraplength=570, justify="left").pack(anchor="w", pady=(2, 0))
+                 wraplength=630, justify="left").pack(anchor="w", pady=(2, 0))
 
         table_frame = tk.Frame(win, bg=Theme.BG)
         table_frame.pack(expand=True, fill="both", padx=14, pady=8)
-
         columns = ("order", "freq", "vpk", "apk")
         tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=18)
         tree.heading("order", text="Harmonic")
@@ -1645,7 +1644,6 @@ class WaveformAnalysisPanel(tk.Frame):
         tree.column("freq", width=130, anchor="center")
         tree.column("vpk", width=150, anchor="e")
         tree.column("apk", width=150, anchor="e")
-
         scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scroll.set)
         tree.pack(side="left", expand=True, fill="both")
@@ -1663,9 +1661,37 @@ class WaveformAnalysisPanel(tk.Frame):
         tk.Label(footer,
                  text=f"THD_V={100*self.packet.thd_voltage:.2f}%   ·   THD_I={100*self.packet.thd_current:.2f}%   ·   Fs={self.packet.sampling_rate_hz} Hz",
                  bg=Theme.BG, fg=Theme.GOOD, font=("Segoe UI", 10, "bold")).pack(side="left")
+        tk.Button(footer, text="Save CSV", bg=Theme.ACCENT, fg=Theme.BLACK,
+                  activebackground=Theme.ACCENT_2, relief="flat", padx=12, pady=4,
+                  command=self.save_fft_csv).pack(side="right", padx=(8, 0))
         tk.Button(footer, text="Close", bg=Theme.PANEL_2, fg=Theme.TEXT,
                   activebackground=Theme.BORDER, relief="flat", padx=12, pady=4,
                   command=win.destroy).pack(side="right")
+
+    def save_fft_csv(self) -> None:
+        if self.packet is None:
+            messagebox.showinfo("Save CSV", "No waveform capture available yet.")
+            return
+        filename = filedialog.asksaveasfilename(
+            title="Save FFT table CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile="smartplug_fft.csv",
+        )
+        if not filename:
+            return
+        save_ts = now_str()
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["capture_timestamp", "save_timestamp", "sampling_rate_hz", "fundamental_hz", "thd_voltage_percent", "thd_current_percent", "harmonic_order", "frequency_hz", "voltage_mag_vpk", "current_mag_apk"])
+            for h in self.packet.harmonics:
+                writer.writerow([
+                    self.packet.timestamp, save_ts, self.packet.sampling_rate_hz, self.packet.fundamental_hz,
+                    100.0 * self.packet.thd_voltage, 100.0 * self.packet.thd_current,
+                    int(safe_float(h.get("order"))), safe_float(h.get("frequency_hz")),
+                    safe_float(h.get("voltage_mag_vpk")), safe_float(h.get("current_mag_apk")),
+                ])
+        messagebox.showinfo("Save CSV", f"FFT table saved:\n{filename}")
 
 
 class NullStatusPanel:
@@ -1796,6 +1822,11 @@ class SmartPlugApp:
         self.root.geometry("1400x900")
         self.root.minsize(1160, 760)
         self.root.configure(bg=Theme.BG)
+        try:
+            self.root.state("zoomed")
+        except tk.TclError:
+            # Some non-Windows Tk builds do not support the zoomed state.
+            pass
 
         self.incoming_queue: "queue.Queue[Tuple[str, str]]" = queue.Queue()
         self.router = MessageRouter(self)
@@ -1987,7 +2018,7 @@ class SmartPlugApp:
         self.dashboard_frame.set_collecting(False)
         self.dashboard_frame.waveform_panel.update_packet(packet)
         self.dashboard_frame.status_panel.set_waveform(
-            f"Waveform OK · 512 samples · {1000*packet.duration_s:.2f} ms · THD_V={100*packet.thd_voltage:.2f}%",
+            f"Waveform OK · {len(packet.voltage_samples)} samples · {1000*packet.duration_s:.2f} ms · THD_V={100*packet.thd_voltage:.2f}%",
             Theme.GOOD,
         )
         self.log("Waveform received; FFT/THD updated.", level="success")
@@ -2010,7 +2041,7 @@ class SmartPlugApp:
         if ok:
             self.collecting_waveform = True
             self.dashboard_frame.set_collecting(True, WAVEFORM_CAPTURE_SECONDS)
-            self.dashboard_frame.status_panel.set_waveform("Collecting 512 samples at 6.99 kHz…", Theme.WARN)
+            self.dashboard_frame.status_panel.set_waveform(f"Collecting {WAVEFORM_SAMPLE_COUNT} samples at {SAMPLE_RATE_HZ} Hz…", Theme.WARN)
             
             # --- NEW: 2-second timeout condition ---
             self._waveform_req_id += 1
@@ -2052,6 +2083,40 @@ class SmartPlugApp:
             self.dashboard_frame.status_panel.add(message, level=level)
         except Exception:
             pass
+
+
+    def save_metrics_csv(self) -> None:
+        sample = self.latest_telemetry
+        if not sample.timestamp:
+            messagebox.showinfo("Save metrics CSV", "No telemetry sample has been received yet.")
+            return
+        filename = filedialog.asksaveasfilename(
+            title="Save main metrics CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile="smartplug_metrics.csv",
+        )
+        if not filename:
+            return
+
+        s_va, disp_pf, phi_deg = displacement_metrics_from_pq(sample.active_power, sample.reactive_power)
+        save_ts = now_str()
+        load_type = load_type_from_reactive_power(sample.reactive_power)
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "save_timestamp", "telemetry_timestamp", "vrms", "irms", "true_pf_including_thd",
+                "active_power_w", "reactive_power_var", "apparent_power_va", "frequency_hz",
+                "energy_wh", "temperature_c", "relay", "no_load", "load_type",
+                "displacement_pf_from_pq", "phase_angle_deg_from_pq",
+            ])
+            writer.writerow([
+                save_ts, sample.timestamp, sample.vrms, sample.irms, sample.pf,
+                sample.active_power, sample.reactive_power, s_va, sample.frequency,
+                sample.energy_wh, sample.tmp_c, sample.relay, sample.no_load, load_type,
+                disp_pf, phi_deg,
+            ])
+        messagebox.showinfo("Save metrics CSV", f"Main metrics saved:\n{filename}")
 
     def on_close(self) -> None:
         self.data_source.stop()
