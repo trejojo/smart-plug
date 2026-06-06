@@ -25,7 +25,7 @@
 #include "module_tmp102.h"
 #include "module_wifi.h"
 
-static const char *TAG = "aice_smartplug"; // Updated TAG to AICE
+static const char *TAG = "ayce_smartplug"; // Updated TAG to AYCE
 static bool g_relay_on = false;
 static bool g_mqtt_connect_requested = false;
 static TickType_t g_mqtt_connect_requested_tick = 0;
@@ -244,7 +244,7 @@ static void waveform_stream_task(void *pvParameters)
 #endif
 
 /**
- * @brief Represents the high-level connection and operational state of the AICE SmartPlug.
+ * @brief Represents the high-level connection and operational state of the AYCE SmartPlug.
  */
 typedef enum {
     STATUS_IDLE = 0,
@@ -253,15 +253,15 @@ typedef enum {
     STATUS_MQTT_CONNECTING,     // Blinking Green (Wi-Fi connected, connecting to MQTT)
     STATUS_MQTT_CONNECTED,      // Solid Green (MQTT connected)
     STATUS_ERROR,               // Solid Red (ADE trip or sensor error)
-} aice_status_t;
+} ayce_status_t;
 
 /**
  * @brief Helper to atomically update the global system status.
  */
-static volatile aice_status_t g_current_status = STATUS_IDLE;
+static volatile ayce_status_t g_current_status = STATUS_IDLE;
 
 // Helper to update the system status
-static void aice_set_status(aice_status_t s)
+static void ayce_set_status(ayce_status_t s)
 {
     g_current_status = s;
 }
@@ -297,28 +297,28 @@ static const ade_irq_policy_t g_ade_irq_policy = {
  * * Also handles MQTT connection initiation and timeout retries.
  * * @param credentials_in_nvs Boolean indicating if WiFi credentials exist in flash memory.
  */
-static void aice_refresh_network_state(bool credentials_in_nvs)
+static void ayce_refresh_network_state(bool credentials_in_nvs)
 {
     const bool wifi_connected = module_wifi_is_connected();
     const bool mqtt_connected = module_mqtt_is_connected();
 
     if (mqtt_connected) {
         g_mqtt_connect_requested = false;
-        aice_set_status(STATUS_MQTT_CONNECTED);
+        ayce_set_status(STATUS_MQTT_CONNECTED);
         return;
     }
 
     if (!wifi_connected) {
         g_mqtt_connect_requested = false;
         if (credentials_in_nvs) {
-            aice_set_status(STATUS_WIFI_CONNECTING);
+            ayce_set_status(STATUS_WIFI_CONNECTING);
         } else {
-            aice_set_status(STATUS_BLE_WAITING);
+            ayce_set_status(STATUS_BLE_WAITING);
         }
         return;
     }
 
-    aice_set_status(STATUS_MQTT_CONNECTING);
+    ayce_set_status(STATUS_MQTT_CONNECTING);
 
     if (!g_mqtt_connect_requested) {
         ESP_LOGI(TAG, "WiFi connected, attempting MQTT connection to %s:%u", MQTT_BROKER_IP, MQTT_BROKER_PORT);
@@ -338,7 +338,7 @@ static void aice_refresh_network_state(bool credentials_in_nvs)
 /**
  * @brief Callback to dynamically update the ADE hardware safety limits received from MQTT.
  */
-static esp_err_t aice_apply_safety_limits_update(float max_vrms, float max_iarms, void *user_data)
+static esp_err_t ayce_apply_safety_limits_update(float max_vrms, float max_iarms, void *user_data)
 {
     (void)user_data;
 
@@ -363,7 +363,7 @@ static esp_err_t aice_apply_safety_limits_update(float max_vrms, float max_iarms
  * @brief MQTT Callback function to parse and queue relay control commands safely.
  * * Uses a Mutex to protect global flags that will be consumed by the main loop.
  */
-static esp_err_t aice_queue_relay_command(const char *action, void *user_data)
+static esp_err_t ayce_queue_relay_command(const char *action, void *user_data)
 {
     (void)user_data;
 
@@ -410,7 +410,7 @@ static esp_err_t aice_queue_relay_command(const char *action, void *user_data)
  * relay. If conditions are safe or if the system was in a normal state, it safely toggles 
  * the relay state and publishes an updated notification packet over MQTT.
  */
-static void aice_handle_relay_toggle_request(const char *source,
+static void ayce_handle_relay_toggle_request(const char *source,
                                              bool credentials_in_nvs,
                                              bool *critical_protection_active,
                                              uint64_t *critical_protection_started_ms)
@@ -432,19 +432,19 @@ static void aice_handle_relay_toggle_request(const char *source,
                 module_relay_set(true);
                 ESP_ERROR_CHECK_WITHOUT_ABORT(module_mqtt_publish_relay(g_relay_on));
                 ESP_LOGI(TAG, "%s: critical protection cleared, relay closed", source != NULL ? source : "Relay request");
-                aice_refresh_network_state(credentials_in_nvs);
+                ayce_refresh_network_state(credentials_in_nvs);
             } else {
                 module_relay_set(false);
                 g_relay_on = false;
                 ESP_ERROR_CHECK_WITHOUT_ABORT(module_mqtt_publish_relay(g_relay_on));
-                aice_set_status(STATUS_ERROR);
+                ayce_set_status(STATUS_ERROR);
                 ESP_LOGW(TAG, "%s ignored: protection condition still present", source != NULL ? source : "Relay request");
             }
         } else {
             module_relay_set(false);
             g_relay_on = false;
             ESP_ERROR_CHECK_WITHOUT_ABORT(module_mqtt_publish_relay(g_relay_on));
-            aice_set_status(STATUS_ERROR);
+            ayce_set_status(STATUS_ERROR);
             ESP_LOGW(TAG, "%s could not verify recovery: %s", source != NULL ? source : "Relay request", esp_err_to_name(recovery_ret));
         }
     } else {
@@ -845,7 +845,7 @@ static void led_control_task(void *pvParameters)
 {
     bool toggle = false;
     while (1) {
-        aice_status_t current = g_current_status;
+        ayce_status_t current = g_current_status;
         uint8_t r = 0, g = 0, b = 0;
 
         switch (current) {
@@ -932,8 +932,8 @@ void app_main(void)
     s_main_task_handle = xTaskGetCurrentTaskHandle();
     s_relay_gpio = pins->relay_gpio;
 
-    esp_log_level_set("aice_smartplug", ESP_LOG_INFO);
-    ESP_LOGI(TAG, "AICE bring-up boot (%s)", smartplug_board_profile_name());
+    esp_log_level_set("ayce_smartplug", ESP_LOG_INFO);
+    ESP_LOGI(TAG, "AYCE bring-up boot (%s)", smartplug_board_profile_name());
     ESP_LOGI(TAG, "Relay GPIO: %d", pins->relay_gpio);
     ESP_LOGI(TAG, "RGB LED GPIO: %d", pins->rgb_led_gpio);
     ESP_LOGI(TAG, "TMP102 SDA/SCL: %d/%d", pins->tmp102_sda_gpio, pins->tmp102_scl_gpio);
@@ -951,8 +951,8 @@ void app_main(void)
     ESP_ERROR_CHECK(module_ble_init());
     ESP_ERROR_CHECK(module_wifi_init());
     ESP_ERROR_CHECK(module_mqtt_init());
-    ESP_ERROR_CHECK(module_mqtt_set_safety_limits_handler(aice_apply_safety_limits_update, NULL));
-    ESP_ERROR_CHECK(module_mqtt_set_relay_command_handler(aice_queue_relay_command, NULL));
+    ESP_ERROR_CHECK(module_mqtt_set_safety_limits_handler(ayce_apply_safety_limits_update, NULL));
+    ESP_ERROR_CHECK(module_mqtt_set_relay_command_handler(ayce_queue_relay_command, NULL));
 
     bool credentials_in_nvs = module_nvs_credentials_exist();
     if (credentials_in_nvs) {
@@ -973,7 +973,7 @@ void app_main(void)
         ESP_ERROR_CHECK(module_ble_start_advertising());
     }
 
-    aice_refresh_network_state(credentials_in_nvs);
+    ayce_refresh_network_state(credentials_in_nvs);
 
     // Start the asynchronous LED handling task
     xTaskCreate(led_control_task, "led_control_task", 2048, NULL, 5, NULL);
@@ -1055,7 +1055,7 @@ void app_main(void)
             
             else if (!critical_protection_active) {
                 g_relay_on = false;            // Sync the MQTT payload state
-                aice_set_status(STATUS_ERROR); // Turn the LED Red
+                ayce_set_status(STATUS_ERROR); // Turn the LED Red
 
                 ESP_LOGE(TAG, "Hardware Safety Trip! Relay physically opened by ISR.");
                 
@@ -1110,9 +1110,9 @@ void app_main(void)
                 // If it was a short press (less than 4 seconds)
                 if (button_press_ticks > 0 && button_press_ticks < 40) {
                     if (critical_protection_active) {
-                        aice_handle_relay_toggle_request("Button short press", credentials_in_nvs, &critical_protection_active, &critical_protection_started_ms);
+                        ayce_handle_relay_toggle_request("Button short press", credentials_in_nvs, &critical_protection_active, &critical_protection_started_ms);
                     } else {
-                        aice_handle_relay_toggle_request("Button short press", credentials_in_nvs, &critical_protection_active, &critical_protection_started_ms);
+                        ayce_handle_relay_toggle_request("Button short press", credentials_in_nvs, &critical_protection_active, &critical_protection_started_ms);
                     }
                 }
                 button_was_pressed = false;
@@ -1140,7 +1140,7 @@ void app_main(void)
         portEXIT_CRITICAL(&g_gui_relay_request_mux);
 
         if (gui_relay_toggle_requested) {
-            aice_handle_relay_toggle_request("GUI relay command", credentials_in_nvs, &critical_protection_active, &critical_protection_started_ms);
+            ayce_handle_relay_toggle_request("GUI relay command", credentials_in_nvs, &critical_protection_active, &critical_protection_started_ms);
         }
 
         // 2. Process NEW Explicit "ON/OFF" logic (from our new GUI)
@@ -1189,7 +1189,7 @@ void app_main(void)
                 }
             }
 
-            aice_refresh_network_state(credentials_in_nvs);
+            ayce_refresh_network_state(credentials_in_nvs);
 
             if (module_mqtt_is_connected()) {
                 g_mqtt_connect_requested = false;
@@ -1287,7 +1287,7 @@ void app_main(void)
             if (ade_trip || sensor_error || critical_protection_active) {
                 module_relay_set(false);
                 g_relay_on = false;
-                aice_set_status(STATUS_ERROR);
+                ayce_set_status(STATUS_ERROR);
             } 
 
             if (critical_protection_report_pending && ade_measurement_ok && module_mqtt_is_connected()) {

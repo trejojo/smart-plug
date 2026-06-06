@@ -29,7 +29,7 @@ DEVICE_NAME = "SmartPlug"
 TARGET_MAC = "E0:72:A1:CE:A3:8A"  # Got by nRF Connect
 
 # Working development credentials. Keep in sync with the GUI defaults.
-DEFAULT_WIFI_SSID = "AICE_HS"
+DEFAULT_WIFI_SSID = "AYCE_HS"
 DEFAULT_WIFI_PASSWORD = "Bake_This"
 DEFAULT_MQTT_BROKER = "192.168.137.1"
 DEFAULT_MQTT_PORT = 1883
