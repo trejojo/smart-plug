@@ -292,7 +292,11 @@ static const ade_irq_policy_t g_ade_irq_policy = {
     .pull_down_en = GPIO_PULLDOWN_DISABLE,
     .isr_service_flags = 0,
 };
-
+/**
+ * @brief Evaluates current network flags (WiFi/MQTT) and updates the global device state.
+ * * Also handles MQTT connection initiation and timeout retries.
+ * * @param credentials_in_nvs Boolean indicating if WiFi credentials exist in flash memory.
+ */
 static void aice_refresh_network_state(bool credentials_in_nvs)
 {
     const bool wifi_connected = module_wifi_is_connected();
@@ -331,6 +335,9 @@ static void aice_refresh_network_state(bool credentials_in_nvs)
     }
 }
 
+/**
+ * @brief Callback to dynamically update the ADE hardware safety limits received from MQTT.
+ */
 static esp_err_t aice_apply_safety_limits_update(float max_vrms, float max_iarms, void *user_data)
 {
     (void)user_data;
@@ -352,6 +359,10 @@ static esp_err_t aice_apply_safety_limits_update(float max_vrms, float max_iarms
     return ESP_OK;
 }
 
+/**
+ * @brief MQTT Callback function to parse and queue relay control commands safely.
+ * * Uses a Mutex to protect global flags that will be consumed by the main loop.
+ */
 static esp_err_t aice_queue_relay_command(const char *action, void *user_data)
 {
     (void)user_data;
@@ -390,6 +401,15 @@ static esp_err_t aice_queue_relay_command(const char *action, void *user_data)
     return ESP_ERR_INVALID_ARG;
 }
 
+/**
+ * @brief Evaluates grid recovery and processes relay state modification requests.
+ *
+ * Checks if the system is currently recovering from a critical safety trip (e.g., overvoltage). 
+ * If a critical condition was active, it forces a real-time readout from the ADE7953 to 
+ * verify if line parameters have stabilized back within safe limits before re-enabling the 
+ * relay. If conditions are safe or if the system was in a normal state, it safely toggles 
+ * the relay state and publishes an updated notification packet over MQTT.
+ */
 static void aice_handle_relay_toggle_request(const char *source,
                                              bool credentials_in_nvs,
                                              bool *critical_protection_active,
@@ -434,7 +454,15 @@ static void aice_handle_relay_toggle_request(const char *source,
         ESP_LOGI(TAG, "%s: Relay toggled %s", source != NULL ? source : "Relay request", g_relay_on ? "ON" : "OFF");
     }
 }
-
+/**
+ * @brief Pulls real-time telemetry from the ADE7953 and verifies electrical safety limits.
+ *
+ * Logs extensive metrics—including VRMS, IRMS, active/apparent power, line frequency, 
+ * power factor, total energy accumulation, and internal raw register states—to the serial 
+ * interface. Following diagnostic telemetry output, it assesses measurements against 
+ * software policy boundaries to determine if a hardware safety cutoff condition has occurred.
+ *
+ */
 static bool ade7953_service_and_should_trip(const ade7953_measurement_t *measurement,
                                             const ade7953_safety_limits_t *limits,
                                             ade7953_safety_decision_t *out_decision)
@@ -485,7 +513,15 @@ static bool ade7953_service_and_should_trip(const ade7953_measurement_t *measure
 
     return decision.trip;
 }
-
+/**
+ * @brief Assesses whether the active load on the smart plug drops below operational thresholds.
+ *
+ * Queries the raw Accumulation Mode (ACCMODE) flags mapped out from the ADE7953 energy metrics 
+ * to parse whether the silicon has flagged an active channel 'no-load' status bit.
+ *
+ * @param[in] measurement Pointer to the evaluation measurement structure.
+ * * @return true if the chip reports no-load status on Channel A, false if a load is detected or argument is NULL.
+ */
 static bool ade7953_measurement_has_no_load(const ade7953_measurement_t *measurement)
 {
     if (measurement == NULL) {
@@ -495,6 +531,13 @@ static bool ade7953_measurement_has_no_load(const ade7953_measurement_t *measure
     return (measurement->raw.accmode & ADE7953_ACCMODE_ACTNLOAD_A) != 0;
 }
 
+/**
+ * @brief Resolves active hardware event flags and software decisions into a descriptive string literal.
+ *
+ * Inspects a combination of raw hardware interrupt events and downstream software trip decisions 
+ * to isolate the precise root cause triggering an emergency relay isolation (e.g., pure Overcurrent, 
+ * an Overcurrent sag under low voltage bounds, or Overvoltage).
+ */
 static const char *critical_protection_cause_from_events(const ade7953_events_t *events,
                                                          const ade7953_measurement_t *measurement,
                                                          const ade7953_safety_decision_t *decision)
@@ -534,6 +577,13 @@ static const char *critical_protection_cause_from_events(const ade7953_events_t 
     return "UNKNOWN";
 }
 
+/**
+ * @brief Quantifies the temporal duration of a critical fault state translated into line cycles.
+ *
+ * Calculates the delta time elapsed from the initial ignition of a safety fault condition 
+ * to the terminal snapshot timestamp, converting milliseconds into physical line cycles 
+ * proportional to the active grid frequency.
+ */
 static uint32_t critical_protection_duration_cycles(const ade7953_measurement_t *measurement,
                                                     uint64_t start_ms)
 {
@@ -553,7 +603,13 @@ static uint32_t critical_protection_duration_cycles(const ade7953_measurement_t 
 
     return (uint32_t)(cycles + 0.5f);
 }
-
+/**
+ * @brief Hard-wired IRAM interrupt service handler executing rapid safety fault isolation.
+ * This function handles safety-critical interrupts from the energy monitoring chip. To achieve 
+ * sub-millisecond response loops, it bypasses the standard operating system scheduler queues by 
+ * interacting directly with the peripheral registers to clear the relay driver GPIO line. It then 
+ * triggers non-blocking context switch notifications to unblock background handler tasks.
+ */
 static void IRAM_ATTR ade7953_safety_irq_handler(void *arg)
 {
     if (s_relay_gpio != GPIO_NUM_NC) {
@@ -575,6 +631,17 @@ static void IRAM_ATTR ade7953_safety_irq_handler(void *arg)
 }
 
 #if ENABLE_WAVEFORM_STREAM
+/**
+ * @brief High-priority, microsecond-accurate task executing bounded polling waveform capture.
+ *
+ * Implements a time-critical tracking block utilizing hardware micro-delays (`esp_rom_delay_us`) 
+ * to sample raw voltage and current waveforms out of the ADE7953 over SPI at exactly ~2400 Hz. 
+ * Bypasses tick-based RTOS context yielding to eliminate scheduling jitter during the sampling window. 
+ * Employs a fallback retry configuration and a strict execution watchdog limit to protect the 
+ * processor from watchdog timeouts and background thread starvation.
+ *
+ * @param[in] pvParameters Generic FreeRTOS parameter block context pointer.
+ */
 static void waveform_capture_task(void *pvParameters)
 {
     (void)pvParameters;
@@ -732,6 +799,14 @@ static void waveform_capture_task(void *pvParameters)
 }
 #endif
 
+/**
+ * @brief Initializes and registers the low-level GPIO interrupt service for the ADE7953.
+ *
+ * Configures the specified physical IRQ pin as a digital input using the electrical policy's 
+ * resistor pull settings and hardware edge trigger properties. It installs the ESP32 global 
+ * ISR service framework (safely ignoring any errors if it was previously instantiated by 
+ * another module) and attaches the unified callback driver to handle immediate runtime events.
+ */
 static void ade_irq_isr_setup(const smartplug_board_pins_t *pins, const ade_irq_policy_t *policy)
 {
     if (pins == NULL || policy == NULL) {
@@ -756,7 +831,16 @@ static void ade_irq_isr_setup(const smartplug_board_pins_t *pins, const ade_irq_
     ESP_ERROR_CHECK(gpio_isr_handler_add(pins->ade_irq_gpio, unified_ade_gpio_isr_handler, NULL));
 }
 
-// Dedicated FreeRTOS task to handle LED colors and blinking asynchronously (GRB Hardware Mapping)
+/**
+ * @brief Asynchronous FreeRTOS execution task managing device status signaling via RGB LED.
+ * 
+ * Runs continuously in an infinite background loop to read the global system connection state 
+ * machine (`g_current_status`). It drives custom pulse and solid illumination indicators to visually 
+ * represent BLE provisioning, Wi-Fi transitions, and MQTT health. 
+ * * @note This handler explicitly handles inverted GRB (Green-Red-Blue) physical hardware matrices 
+ * by software-mapping target Red requests onto the physical Green lane register, and vice versa.
+ * @param[in] pvParameters Generic FreeRTOS parameter block context pointer (unused).
+ */
 static void led_control_task(void *pvParameters)
 {
     bool toggle = false;
@@ -805,7 +889,13 @@ static void led_control_task(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(500)); 
     }
 }
-
+/**
+ * @brief Configures the physical user-button GPIO line for digital input polling.
+ *
+ * Allocates explicit hardware properties to a specified push-button pin—forcing an internal 
+ * pull-up electrical resistor profile while entirely suppressing edge-triggered interrupts to 
+ * ensure safe state evaluation via standard main loop software debouncing routines.
+ */
 static void setup_button_init(gpio_num_t gpio_num)
 {
     gpio_config_t button_cfg = {
