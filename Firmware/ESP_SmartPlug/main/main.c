@@ -174,7 +174,7 @@ esp_err_t module_ade7953_start_snapshot_capture(void)
 static void waveform_stream_task(void *pvParameters)
 {
     s_waveform_pub_task_handle = xTaskGetCurrentTaskHandle();
-
+    // Allocate a large buffer for the JSON string on the heap to avoid stack overflow
     char *json_scratchpad = malloc(WAVEFORM_JSON_SCRATCHPAD_SIZE);
     if (json_scratchpad == NULL) {
         ESP_LOGE(TAG, "Failed to allocate waveform JSON scratchpad");
@@ -185,7 +185,7 @@ static void waveform_stream_task(void *pvParameters)
     while (true) {
         // 1. WAIT FOREVER until the fast task gives us the 512 samples!
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
+        // Lock in the buffer that is ready for processing (ping-pong logic)
         int32_t *v_ptr = NULL;
         int32_t *i_ptr = NULL;
         uint16_t sample_count = 0;
@@ -203,28 +203,28 @@ static void waveform_stream_task(void *pvParameters)
         if (v_ptr == NULL || i_ptr == NULL || sample_count == 0) {
             continue;
         }
-
+        // Retrieve current calibration constants to convert LSBs to floats
         ade7953_calibration_t cal = {0};
         module_ade7953_get_calibration(&cal);
         const float v_scale = cal.volts_per_vrms_lsb > 0.0f ? cal.volts_per_vrms_lsb : 0.00001903f;
         const float i_scale = cal.amps_per_irmsa_lsb > 0.0f ? cal.amps_per_irmsa_lsb : 0.00000076f;
-
+        // Build the JSON Payload
         int offset = snprintf(json_scratchpad, WAVEFORM_JSON_SCRATCHPAD_SIZE,
                               "{\"event_type\":\"WAVEFORM_CHUNK\",\"count\":%" PRIu16 ",\"v\":[",
                               sample_count);
-
+        // Append Voltage samples
         for (uint16_t i = 0; i < sample_count && offset < WAVEFORM_JSON_SCRATCHPAD_SIZE; ++i) {
             offset += snprintf(json_scratchpad + offset, WAVEFORM_JSON_SCRATCHPAD_SIZE - offset,
                                "%.2f%s", (float)v_ptr[i] * v_scale, (i + 1U == sample_count) ? "" : ",");
         }
 
         offset += snprintf(json_scratchpad + offset, WAVEFORM_JSON_SCRATCHPAD_SIZE - offset, "],\"i\":[");
-
+        // Append Current samples
         for (uint16_t i = 0; i < sample_count && offset < WAVEFORM_JSON_SCRATCHPAD_SIZE; ++i) {
             offset += snprintf(json_scratchpad + offset, WAVEFORM_JSON_SCRATCHPAD_SIZE - offset,
                                "%.3f%s", (float)i_ptr[i] * i_scale, (i + 1U == sample_count) ? "" : ",");
         }
-
+        // Publish to MQTT
         snprintf(json_scratchpad + offset, WAVEFORM_JSON_SCRATCHPAD_SIZE - offset, "]}");
 
         esp_err_t publish_ret = module_mqtt_publish_waveform_chunk(json_scratchpad);
@@ -243,7 +243,9 @@ static void waveform_stream_task(void *pvParameters)
 }
 #endif
 
-
+/**
+ * @brief Represents the high-level connection and operational state of the AICE SmartPlug.
+ */
 typedef enum {
     STATUS_IDLE = 0,
     STATUS_BLE_WAITING,         // Blinking Blue (Waiting for credentials)
@@ -253,7 +255,9 @@ typedef enum {
     STATUS_ERROR,               // Solid Red (ADE trip or sensor error)
 } aice_status_t;
 
-// Global variable to hold the current status
+/**
+ * @brief Helper to atomically update the global system status.
+ */
 static volatile aice_status_t g_current_status = STATUS_IDLE;
 
 // Helper to update the system status
