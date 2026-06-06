@@ -37,7 +37,7 @@ The firmware-side `module_mqtt.c` is not part of this folder. It should remain i
 | `smartplug/commands/config` | Safety/configuration limits | JSON |
 | `smartplug/waveform/request` | Request one 512-sample waveform capture | JSON |
 
-The PC parser still accepts older development topics such as `smartplug/status`, `smartplug/cmd`, `aice/cmd`, `aice/status`, `smartplug/waveform/chunk` and `smartplug/waveform` for transition/testing. The GUI publishes the standardized topics listed above.
+The PC parser still accepts older development topics such as `smartplug/status`, `smartplug/cmd`, `ayce/cmd`, `ayce/status`, `smartplug/waveform/chunk` and `smartplug/waveform` for transition/testing. The GUI publishes the standardized topics listed above.
 
 ## 3. Expected status telemetry payload
 

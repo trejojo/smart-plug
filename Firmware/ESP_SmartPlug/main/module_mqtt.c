@@ -31,8 +31,8 @@ static const char *TAG = "module_mqtt";
 #define LEGACY_TOPIC_TEMPERATURE     "smartplug/temperature"
 #define LEGACY_TOPIC_ENERGY          "smartplug/energy"
 #define LEGACY_TOPIC_RELAY_CMD       "smartplug/cmd"
-#define LEGACY_TOPIC_AICE_CMD        "aice/cmd"
-#define LEGACY_TOPIC_AICE_STATUS     "aice/status"
+#define LEGACY_TOPIC_AYCE_CMD        "ayce/cmd"
+#define LEGACY_TOPIC_AYCE_STATUS     "ayce/status"
 #define LEGACY_TOPIC_WAVEFORM_CHUNK  "smartplug/waveform/chunk"
 #define LEGACY_TOPIC_WAVEFORM_CMD    "smartplug/waveform/cmd"
 
@@ -397,7 +397,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 			/* Transition aliases for older PC tools. */
 			esp_mqtt_client_subscribe(mqtt_client, LEGACY_TOPIC_RELAY_CMD, 0);
-			esp_mqtt_client_subscribe(mqtt_client, LEGACY_TOPIC_AICE_CMD, 0);
+			esp_mqtt_client_subscribe(mqtt_client, LEGACY_TOPIC_AYCE_CMD, 0);
 			esp_mqtt_client_subscribe(mqtt_client, LEGACY_TOPIC_WAVEFORM_CMD, 0);
 			break;
 
@@ -424,7 +424,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 			ESP_LOGI(TAG, "DATA=%.*s", event->data_len, event->data);
 			
 			/* Process incoming commands from GUI */
-			if (mqtt_topic_matches(event, TOPIC_COMMAND_CONFIG) || mqtt_topic_matches(event, LEGACY_TOPIC_AICE_CMD)) {
+			if (mqtt_topic_matches(event, TOPIC_COMMAND_CONFIG) || mqtt_topic_matches(event, LEGACY_TOPIC_AYCE_CMD)) {
 				handle_safety_limits_command(event);
 			} else if (mqtt_topic_matches(event, TOPIC_WAVEFORM_REQUEST) || mqtt_topic_matches(event, LEGACY_TOPIC_WAVEFORM_CMD)) {
 				handle_safety_limits_command(event);

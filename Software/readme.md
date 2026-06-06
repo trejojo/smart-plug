@@ -66,7 +66,7 @@ The GUI can send WiFi credentials over BLE using the same provisioning helper us
 Default values currently shown by the GUI:
 
 ```text
-SSID: AICE_HS
+SSID: AYCE_HS
 Password: Bake_This
 Broker: 192.168.137.1
 Port: 1883

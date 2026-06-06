@@ -4,7 +4,7 @@
 
 This summary is based on commit history from:
 
-- `remotes/origin/feature/integrate-aice`
+- `remotes/origin/feature/integrate-ayce`
 - `remotes/origin/test/ade7953_calibration`
 
 Reference date: 2026-05-26.
@@ -26,7 +26,7 @@ In short, the firmware moved from initial architecture to a connected and measur
 - Merge-base between both branches: `9a6043f` (2026-05-15).
 - From there, each branch specialized in a different direction.
 
-## Evolution in `feature/integrate-aice`
+## Evolution in `feature/integrate-ayce`
 
 Primary objective: integrate ADE telemetry, protections, and MQTT-host interaction into the production-oriented firmware path.
 
@@ -92,7 +92,7 @@ Primary objective: improve ADE calibration methodology, reproducibility, and def
    - Updated read-measurement behavior.
    - Added NVS calibration handling (`module_nvs.c/.h` changes).
 
-### Technical impact (vs `feature/integrate-aice`)
+### Technical impact (vs `feature/integrate-ayce`)
 
 - 13 files changed, 1512 insertions, 281 deletions.
 - Strong focus on:
@@ -113,12 +113,12 @@ The development evolved in three clear phases:
    - ADE integration and safety logic maturation.
 
 3. Branch specialization
-   - `feature/integrate-aice`: production integration focus (runtime telemetry + host-driven control via MQTT + protection register management).
+   - `feature/integrate-ayce`: production integration focus (runtime telemetry + host-driven control via MQTT + protection register management).
    - `test/ade7953_calibration`: measurement-quality focus (calibration tooling, waveform reconstruction, and calibration defaults persistence path).
 
 ## Current Practical Interpretation
 
-- `feature/integrate-aice` represents the stronger path for integrated runtime firmware behavior and remote operation workflow.
+- `feature/integrate-ayce` represents the stronger path for integrated runtime firmware behavior and remote operation workflow.
 - `test/ade7953_calibration` represents the stronger path for metrology quality and calibration process maturity.
 
 Together, they indicate a firmware trajectory from "functional connectivity" to "electrical accuracy + operational control".

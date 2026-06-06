@@ -15,12 +15,12 @@ typedef esp_err_t (*module_mqtt_relay_command_handler_t)(const char *action, voi
 esp_err_t module_mqtt_init(void);
 
 /**
- * @brief Register a handler for MQTT safety-limit commands on topic aice/cmd
+ * @brief Register a handler for MQTT safety-limit commands on topic ayce/cmd
  */
 esp_err_t module_mqtt_set_safety_limits_handler(module_mqtt_safety_limits_handler_t handler, void *user_data);
 
 /**
- * @brief Register a handler for relay commands on topic aice/cmd
+ * @brief Register a handler for relay commands on topic ayce/cmd
  */
 esp_err_t module_mqtt_set_relay_command_handler(module_mqtt_relay_command_handler_t handler, void *user_data);
 
