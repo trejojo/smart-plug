@@ -6,9 +6,16 @@ This folder contains the AYCE live dashboard, the reusable MQTT client, and the 
 
 | File | Purpose |
 |---|---|
-| `smartplug_gui.py` | Main AYCE GUI. Handles provisioning phase, dashboard, waveform capture, FFT, THD, CSV export, and user commands. |
+| `smartplug_gui.py` | Main AYCE GUI. Handles provisioning phase, dashboard, waveform capture, FFT, THD, CSV export, user commands, and the GUI window icon. |
 | `mqtt_client.py` | Reusable MQTT client and optional console tool for AYCE topics. |
 | `mosquitto.conf` | Local Mosquitto configuration used by the launcher. |
+
+The shared AYCE icon used by the GUI is stored in:
+
+```text
+Software/assets/ayce_logo.ico
+Software/assets/ayce_logo.png
+```
 
 ## Functional overview
 
@@ -23,7 +30,8 @@ Main responsibilities:
 - sends relay and safety-limit commands,
 - requests and plots waveform captures,
 - computes FFT, THD, phase angle, and time shift locally,
-- exports CSV snapshots and tables.
+- exports CSV snapshots and tables,
+- applies the AYCE icon to the GUI window and Windows taskbar.
 
 ### `mqtt_client.py`
 
@@ -77,13 +85,13 @@ At 60 Hz, that is approximately:
 12.80 cycles
 ```
 
-The preferred request payload is:
+Preferred request payload:
 
 ```json
 {"command":"REQUEST_WAVEFORM","sample_count":512,"sampling_rate_hz":2400,"source":"GUI"}
 ```
 
-The preferred waveform response shape is:
+Preferred waveform response shape:
 
 ```json
 {
@@ -111,6 +119,12 @@ Status telemetry acts as the device heartbeat. If it stops arriving for more tha
 
 When `no_load = true`, the GUI preserves the received voltage, frequency, energy, temperature, and relay state, but locally forces load-dependent values to zero for a clean display.
 
+### Power triangle animation
+
+The visual triangle geometry uses smoothed internal display values so the triangle changes size smoothly.
+
+The numeric labels for **P**, **Q**, and **S** use the latest target telemetry immediately. This keeps the values readable when measurements change rapidly.
+
 ### Waveform and harmonic views
 
 The GUI:
@@ -131,12 +145,14 @@ Available exports:
 
 ## Running manually for diagnostics
 
+Launcher-based runs are preferred. Manual runs may create `__pycache__` unless `-B` is used.
+
 ### Run the GUI directly
 
 From `Software`:
 
 ```cmd
-python telemetry\smartplug_gui.py
+python -B telemetry\smartplug_gui.py
 ```
 
 ### Run the console MQTT tool
@@ -144,7 +160,7 @@ python telemetry\smartplug_gui.py
 From `Software`:
 
 ```cmd
-python telemetry\mqtt_client.py --broker 192.168.137.1 --port 1883
+python -B telemetry\mqtt_client.py --broker 192.168.137.1 --port 1883
 ```
 
 Useful console commands include:
@@ -164,3 +180,7 @@ wave
 listener 1883 0.0.0.0
 allow_anonymous true
 ```
+
+## About `__pycache__`
+
+`__pycache__` folders can appear if Python scripts are executed manually without `-B`. They are safe to delete and are not included in the distributed zip.

@@ -9,5 +9,6 @@ if not exist "%PS_SCRIPT%" (
     exit /b 1
 )
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%PS_SCRIPT%"
-exit /b %errorlevel%
+rem Manual fallback. The desktop shortcut normally launches PowerShell directly.
+start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%PS_SCRIPT%"
+exit /b 0

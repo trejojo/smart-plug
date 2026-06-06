@@ -80,14 +80,40 @@ def configure_tk_100_percent_scaling(root: tk.Tk) -> None:
 # Allow running this file directly from Software/telemetry while importing
 # Software/provisioning/provisioner.py.
 SOFTWARE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ASSETS_DIR = os.path.join(SOFTWARE_DIR, "assets")
+AYCE_ICON_ICO = os.path.join(ASSETS_DIR, "ayce_logo.ico")
+AYCE_ICON_PNG = os.path.join(ASSETS_DIR, "ayce_logo.png")
+
 if SOFTWARE_DIR not in sys.path:
     sys.path.insert(0, SOFTWARE_DIR)
+
+
+def configure_window_icon(root: tk.Tk) -> None:
+    """Apply the shared AYCE icon to the Tk window and Windows taskbar."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AYCE.SmartPlug.Dashboard")
+        except Exception:
+            pass
+    try:
+        if os.path.exists(AYCE_ICON_ICO):
+            root.iconbitmap(AYCE_ICON_ICO)
+    except tk.TclError:
+        pass
+    try:
+        if os.path.exists(AYCE_ICON_PNG):
+            icon_photo = tk.PhotoImage(file=AYCE_ICON_PNG)
+            root.iconphoto(True, icon_photo)
+            root._ayce_icon_photo = icon_photo  # keep a reference alive
+    except tk.TclError:
+        pass
+
 
 from mqtt_client import (
     DEFAULT_BROKER,
     DEFAULT_PORT,
     DEFAULT_WAVEFORM_SAMPLE_COUNT,
-    DEFAULT_WAVEFORM_SAMPLE_RATE_HZ,
     SmartPlugMqttClient,
     TOPIC_COMMAND_ACK,
     TOPIC_COMMAND_CONFIG,
@@ -1155,11 +1181,16 @@ class PowerTrianglePanel(tk.Frame):
         base_y = (plot_top + plot_bottom) / 2.0
         axis_left = max(24, origin_x - 32)
 
+        # Geometry remains visually smoothed through _display_p/_display_q.
+        # Numeric labels use the latest target values immediately so rapidly
+        # changing telemetry remains easy to read.
         P = self._display_p if self._display_p is not None else 0.0
         Q = self._display_q if self._display_q is not None else 0.0
+        value_p = self._target_p
+        value_q = self._target_q
+        value_s, value_disp_pf, value_phi_deg = displacement_metrics_from_pq(value_p, value_q)
         abs_p = abs(P)
         abs_q = abs(Q)
-        S, disp_pf, phi_deg = displacement_metrics_from_pq(P, Q)
 
         drawable_w = max(100.0, axis_right - origin_x - 30)
         drawable_h = max(60.0, min(base_y - plot_top, plot_bottom - base_y) - 12)
@@ -1190,20 +1221,21 @@ class PowerTrianglePanel(tk.Frame):
             c.create_line(x2, base_y, x2, yq, fill=Theme.ACCENT, width=4, arrow="last")
             c.create_line(origin_x, base_y, x2, yq, fill=Theme.PURPLE, width=4, arrow="last")
 
-            c.create_text(min(axis_right - 115, x2 - 64), base_y - 18, text=f"P={P:.1f} W", fill=Theme.GOOD,
+            c.create_text(min(axis_right - 115, x2 - 64), base_y - 18, text=f"P={value_p:.1f} W", fill=Theme.GOOD,
                           font=("Segoe UI", 9, "bold"))
             q_anchor = "w" if x2 < w - 120 else "e"
             q_x = x2 + 20 if q_anchor == "w" else x2 - 8
-            c.create_text(q_x, (base_y + yq) / 2, anchor=q_anchor, text=f"Q={Q:.1f} var", fill=Theme.ACCENT,
+            c.create_text(q_x, (base_y + yq) / 2, anchor=q_anchor, text=f"Q={value_q:.1f} var", fill=Theme.ACCENT,
                           font=("Segoe UI", 9, "bold"))
 
-            s_text = f"S={S:.1f} VA"
+            s_text = f"S={value_s:.1f} VA"
             s_x = origin_x + 0.52 * (x2 - origin_x)
             s_y = base_y + 0.52 * (yq - base_y)
-            c.create_rectangle(s_x - 46, s_y - 14, s_x + 46, s_y + 14, fill=Theme.PANEL, outline=Theme.PURPLE)
+            s_box_half_w = max(46, min(76, 4 * len(s_text) + 14))
+            c.create_rectangle(s_x - s_box_half_w, s_y - 14, s_x + s_box_half_w, s_y + 14, fill=Theme.PANEL, outline=Theme.PURPLE)
             c.create_text(s_x, s_y, text=s_text, fill=Theme.PURPLE, font=("Segoe UI", 9, "bold"))
 
-        self.summary.configure(text=f"Displacement PF={disp_pf:.3f} · φ={phi_deg:+.1f}° · From P, Q, S only · Ignores harmonic distortion")
+        self.summary.configure(text=f"Displacement PF={value_disp_pf:.3f} · φ={value_phi_deg:+.1f}° · From latest P, Q, S · Ignores harmonic distortion")
 
 
 class MiniMetric(tk.Frame):
@@ -1862,6 +1894,7 @@ class SmartPlugApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(APP_TITLE)
+        configure_window_icon(self.root)
         self.root.geometry("1400x900")
         self.root.minsize(1160, 760)
         self.root.configure(bg=Theme.BG)

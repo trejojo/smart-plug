@@ -6,20 +6,27 @@ This folder contains the official AYCE PC startup helpers.
 
 | File | Purpose |
 |---|---|
-| `start_ayce_system.bat` | Main Windows entry point. Intended target for the desktop shortcut. |
-| `Start-AyceSystem.ps1` | PowerShell supervisor that starts and monitors the broker and GUI. |
-| `create_desktop_shortcut.ps1` | Creates the AYCE desktop shortcut with the AYCE icon. |
-| `create_desktop_shortcut.bat` | Convenience wrapper to run the shortcut-creation PowerShell script on Windows. |
-| `assets/ayce_logo.ico` | Icon used for the desktop shortcut. |
+| `create_desktop_shortcut.bat` | Recommended one-time shortcut installer for Windows users. |
+| `create_desktop_shortcut.ps1` | PowerShell implementation that creates the desktop shortcut. |
+| `Start-AyceSystem.ps1` | Hidden supervisor that starts and monitors the broker and GUI. |
+| `start_ayce_system.bat` | Manual fallback launcher. The desktop shortcut does not point to this file anymore. |
+
+The shared icon is stored outside this folder:
+
+```text
+Software/assets/ayce_logo.ico
+Software/assets/ayce_logo.png
+```
 
 ## Normal use
 
 ### One-time setup
 
-Run one of the following once:
+Run once:
 
-- `create_desktop_shortcut.bat` (recommended for most Windows users)
-- or `create_desktop_shortcut.ps1`
+```text
+create_desktop_shortcut.bat
+```
 
 This creates a desktop shortcut named:
 
@@ -27,75 +34,82 @@ This creates a desktop shortcut named:
 AYCE Smart Plug
 ```
 
-The shortcut points to:
+The shortcut launches hidden PowerShell directly:
 
 ```text
-launchers/start_ayce_system.bat
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File Start-AyceSystem.ps1
 ```
 
-and uses:
-
-```text
-launchers/assets/ayce_logo.ico
-```
-
-as its icon.
+This is intentional. It prevents an extra empty launcher console from staying open while the GUI and broker are running.
 
 ### Everyday use
 
 Double-click the **AYCE Smart Plug** desktop shortcut.
 
-That shortcut launches `start_ayce_system.bat`, which in turn starts the hidden PowerShell supervisor `Start-AyceSystem.ps1`.
+Expected result:
+
+1. One visible console named **AYCE MQTT Broker** opens for Mosquitto logs.
+2. The GUI opens without a separate Python console.
+3. The hidden supervisor monitors both processes.
 
 ## What `Start-AyceSystem.ps1` does
 
 The supervisor performs the following steps:
 
 1. Resolves the project root and required file paths.
-2. Detects Python automatically:
+2. Sets `PYTHONDONTWRITEBYTECODE=1` to avoid project `__pycache__` generation during normal use.
+3. Detects Python automatically:
    - first `.venv_pc`,
    - then `.venv`,
    - otherwise system Python.
-3. Verifies required Python modules:
+4. Verifies required Python modules:
    - `paho-mqtt`
    - `bleak`
-4. Locates `mosquitto.exe`.
-5. Starts the broker in a **visible console window**.
-6. Starts the GUI using **`pythonw.exe`** so there is **no Python console window**.
-7. Monitors both processes.
-8. If one is closed, it closes the other.
+5. Locates `mosquitto.exe`.
+6. Starts the broker in a **visible console window**.
+7. Starts the GUI using **`pythonw.exe -B`** so there is **no Python console window**.
+8. Monitors both processes.
+9. If one is closed, it closes the other using process-tree cleanup.
 
 ## Shutdown behavior
 
 The launcher supervises only the processes it started.
 
-- Closing the GUI closes the broker console started by the launcher.
-- Closing the broker console closes the GUI started by the launcher.
+- Closing the GUI closes the broker console and child processes.
+- Closing the broker console closes the GUI process.
 
-## Why there is both `.ps1` and `.bat`
+Cleanup uses:
 
-The PowerShell scripts contain the main logic, but many Windows systems do not reliably execute `.ps1` files by double-clicking.
+```text
+taskkill /PID <pid> /T /F
+```
 
-For that reason:
+This is more robust than closing only the direct parent process.
 
-- `start_ayce_system.bat` is the safest shortcut target.
-- `create_desktop_shortcut.bat` is the safest one-click shortcut installer.
+## Why both `.ps1` and `.bat` exist
 
-The `.ps1` files remain the implementation layer.
+The PowerShell scripts contain the real logic.
+
+The `.bat` files are convenience wrappers for Windows users:
+
+- `create_desktop_shortcut.bat` is the recommended way to create the shortcut.
+- `start_ayce_system.bat` is kept only as a manual fallback.
 
 ## If a virtual environment exists
 
 No problem. The launcher auto-detects `.venv_pc` or `.venv`. If neither exists, it falls back to system Python.
 
-## If Mosquitto is already running elsewhere
+## About `__pycache__`
 
-The launcher is designed for the local AYCE workflow where it starts its own broker console. It supervises only the broker instance it launches itself.
+Launcher-based GUI runs should not create project `__pycache__` folders because the supervisor sets `PYTHONDONTWRITEBYTECODE=1` and starts the GUI with `-B`.
+
+If `__pycache__` appears after manual script execution, it can be deleted safely.
 
 ## Troubleshooting
 
 ### Shortcut was not created
 
-Try `create_desktop_shortcut.bat` instead of double-clicking the `.ps1` file.
+Run `create_desktop_shortcut.bat` instead of double-clicking the `.ps1` file.
 
 ### The shortcut opens but nothing happens
 
@@ -108,8 +122,8 @@ Check:
 
 ### The broker console opens but the GUI does not
 
-Most likely a missing Python dependency. Install:
+Most likely a missing Python dependency. From the `Software` folder run:
 
 ```cmd
-pip install -r ..equirements.txt
+pip install -r requirements.txt
 ```

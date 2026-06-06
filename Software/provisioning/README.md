@@ -43,17 +43,25 @@ The current PC-side workflow keeps `include_mqtt_fields=False` by default to pre
 
 ## Running the helper directly
 
+Launcher-based GUI use is preferred. Manual Python execution may create `__pycache__` unless `-B` is used.
+
 From the `Software` folder:
 
 ```cmd
-python provisioning\provisioner.py --ssid MY_HOTSPOT --password MY_PASSWORD --mac E0:72:A1:CE:A3:8A
+python -B provisioning\provisioner.py --ssid MY_HOTSPOT --password MY_PASSWORD --mac E0:72:A1:CE:A3:8A
 ```
 
 Optional flags depend on the script interface. Use:
 
 ```cmd
-python provisioning\provisioner.py --help
+python -B provisioning\provisioner.py --help
 ```
+
+## About `__pycache__`
+
+`__pycache__` folders are Python bytecode caches. They are not necessary for distribution and can be deleted safely.
+
+The launcher sets `PYTHONDONTWRITEBYTECODE=1` and uses Python `-B` for normal GUI startup to avoid generating project `__pycache__` folders.
 
 ## Notes
 

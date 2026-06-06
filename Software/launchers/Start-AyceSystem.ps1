@@ -1,6 +1,9 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework
 
+# Prevent project __pycache__ folders from being created by launcher-based runs.
+$env:PYTHONDONTWRITEBYTECODE = '1'
+
 function Show-LauncherError {
     param([string]$Message)
     [System.Windows.MessageBox]::Show($Message, 'AYCE Smart Plug Launcher', 'OK', 'Error') | Out-Null
@@ -14,6 +17,16 @@ function Get-FirstExistingPath {
         }
     }
     return $null
+}
+
+function Stop-ProcessTree {
+    param([int]$ProcessId)
+    if ($ProcessId -le 0) { return }
+    try {
+        Start-Process -FilePath 'taskkill.exe' -ArgumentList @('/PID', "$ProcessId", '/T', '/F') -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
+    } catch {
+        try { Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+    }
 }
 
 function Resolve-PythonRuntime {
@@ -72,7 +85,7 @@ if (-not $pythonRuntime) {
     exit 1
 }
 
-$dependencyCheck = & $pythonRuntime.Python -c "import paho.mqtt.client, bleak" 2>&1
+$dependencyCheck = & $pythonRuntime.Python -B -c "import paho.mqtt.client, bleak" 2>&1
 if ($LASTEXITCODE -ne 0) {
     $msg = "Required Python modules are missing for the selected interpreter.`n`nInterpreter: $($pythonRuntime.Python)`nSource: $($pythonRuntime.Source)`n`nInstall them from the Software folder with:`n`npip install -r requirements.txt`n`nDetails:`n$dependencyCheck"
     Show-LauncherError $msg
@@ -96,7 +109,7 @@ if ($brokerProc.HasExited) {
     exit 1
 }
 
-$guiProc = Start-Process -FilePath $pythonRuntime.Pythonw -ArgumentList @('smartplug_gui.py') -WorkingDirectory $telemetryDir -PassThru
+$guiProc = Start-Process -FilePath $pythonRuntime.Pythonw -ArgumentList @('-B', 'smartplug_gui.py') -WorkingDirectory $telemetryDir -PassThru
 
 try {
     while ($true) {
@@ -106,14 +119,14 @@ try {
 
         if ($guiProc.HasExited) {
             if (-not $brokerProc.HasExited) {
-                Stop-Process -Id $brokerProc.Id -Force -ErrorAction SilentlyContinue
+                Stop-ProcessTree -ProcessId $brokerProc.Id
             }
             break
         }
 
         if ($brokerProc.HasExited) {
             if (-not $guiProc.HasExited) {
-                Stop-Process -Id $guiProc.Id -Force -ErrorAction SilentlyContinue
+                Stop-ProcessTree -ProcessId $guiProc.Id
             }
             break
         }
@@ -121,9 +134,9 @@ try {
 }
 finally {
     if ($brokerProc -and -not $brokerProc.HasExited) {
-        Stop-Process -Id $brokerProc.Id -Force -ErrorAction SilentlyContinue
+        Stop-ProcessTree -ProcessId $brokerProc.Id
     }
     if ($guiProc -and -not $guiProc.HasExited) {
-        Stop-Process -Id $guiProc.Id -Force -ErrorAction SilentlyContinue
+        Stop-ProcessTree -ProcessId $guiProc.Id
     }
 }
