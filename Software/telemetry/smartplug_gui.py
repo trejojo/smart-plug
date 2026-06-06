@@ -39,6 +39,44 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
+
+
+def configure_windows_dpi_awareness() -> None:
+    """Keep the GUI visually close to the 100% Windows scale design.
+
+    Windows can bitmap-scale non-DPI-aware Tkinter apps at 125%/150%, which
+    makes the dashboard too large and can clip panels. Declaring the process as
+    DPI-aware prevents that OS-level enlargement. The Tk scaling value is fixed
+    later, after creating ``tk.Tk()``, to the 96 DPI / 100% baseline.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+    except Exception:
+        return
+
+    # Prefer system-DPI awareness for predictable desktop-dashboard sizing.
+    # The calls can fail if another library already set DPI awareness; that is
+    # harmless, so failures are intentionally ignored.
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def configure_tk_100_percent_scaling(root: tk.Tk) -> None:
+    """Normalize Tk font/widget scaling to the 100% Windows design baseline."""
+    try:
+        root.tk.call("tk", "scaling", TK_100_PERCENT_SCALING)
+    except tk.TclError:
+        pass
+
 # Allow running this file directly from Software/telemetry while importing
 # Software/provisioning/provisioner.py.
 SOFTWARE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -117,6 +155,7 @@ PHASE_RECONNECTING = "reconnecting"
 # GUI-side device heartbeat watchdog. This detects when the ESP32 stops
 # publishing telemetry while the PC MQTT client remains connected to Mosquitto.
 DEVICE_HEARTBEAT_TIMEOUT_S = 3.0
+TK_100_PERCENT_SCALING = 96.0 / 72.0  # 1.3333: Tk baseline for 96 DPI / Windows 100% scale
 DEVICE_HEARTBEAT_CHECK_MS = 500
 
 
@@ -2209,7 +2248,9 @@ class SmartPlugApp:
 # =============================================================================
 
 if __name__ == "__main__":
+    configure_windows_dpi_awareness()
     root = tk.Tk()
+    configure_tk_100_percent_scaling(root)
     app = SmartPlugApp(root)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
