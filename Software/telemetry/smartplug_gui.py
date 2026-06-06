@@ -154,7 +154,7 @@ PHASE_RECONNECTING = "reconnecting"
 
 # GUI-side device heartbeat watchdog. This detects when the ESP32 stops
 # publishing telemetry while the PC MQTT client remains connected to Mosquitto.
-DEVICE_HEARTBEAT_TIMEOUT_S = 3.0
+DEVICE_HEARTBEAT_TIMEOUT_S = 5.0
 TK_100_PERCENT_SCALING = 96.0 / 72.0  # 1.3333: Tk baseline for 96 DPI / Windows 100% scale
 DEVICE_HEARTBEAT_CHECK_MS = 500
 
@@ -428,7 +428,7 @@ def displacement_metrics_from_pq(active_power_w: float, reactive_power_var: floa
     p = safe_float(active_power_w)
     q = safe_float(reactive_power_var)
     s = math.sqrt(max(0.0, p * p + q * q))
-    disp_pf = abs(p) / s if s > 1e-12 else 0.0
+    disp_pf = p / s if s > 1e-12 else 0.0
     phi_deg = math.degrees(math.atan2(q, p)) if (abs(p) > 1e-12 or abs(q) > 1e-12) else 0.0
     return s, disp_pf, phi_deg
 
@@ -903,7 +903,7 @@ class DashboardFrame(tk.Frame):
         self.card_p = Card(cards_frame, "Active Power", "--", "W", "Real power delivered", Theme.GOOD)
         self.card_q = Card(cards_frame, "Reactive Power", "--", "var", "Reactive component", Theme.ACCENT)
         self.card_s = Card(cards_frame, "Apparent Power", "--", "VA", "√(P² + Q²)", Theme.PURPLE)
-        self.card_pf = Card(cards_frame, "Power Factor", "--", "", "True PF, including THD", Theme.WARN)
+        self.card_pf = Card(cards_frame, "Power Factor", "--", "", "True PF, including harmonic distortion", Theme.WARN)
         self.card_f = Card(cards_frame, "Frequency", "--", "Hz", "Mexico grid: 60 Hz", Theme.ACCENT_2)
         self.card_e = Card(cards_frame, "Active Energy", "--", "Wh", "Accumulated", Theme.PINK)
         self.card_t = Card(cards_frame, "Temperature", "--", "°C", "Internal / board temperature", Theme.WARN)
@@ -925,11 +925,11 @@ class DashboardFrame(tk.Frame):
         q_subtitle = "Inductive (positive)" if sample.reactive_power > 1.0 else "Capacitive (negative)" if sample.reactive_power < -1.0 else "Nearly resistive"
 
         self.card_v.set(f"{sample.vrms:.1f}", "V RMS", f"Δ vs 127 V: {sample.vrms - NOMINAL_VRMS:+.1f} V", v_accent)
-        self.card_i.set(f"{sample.irms:.3f}", "A RMS", f"{sample.current_percent_nominal:.0f}% of 5 A RMS nominal", i_accent)
+        self.card_i.set(f"{sample.irms:.3f}", "A RMS", f"{sample.current_percent_nominal:.0f}% of 5 A RMS nominal limit", i_accent)
         self.card_p.set(f"{sample.active_power:.1f}", "W", "Real power delivered", Theme.GOOD)
         self.card_q.set(f"{sample.reactive_power:.1f}", "var", q_subtitle, q_accent)
         self.card_s.set(f"{sample.apparent_power_va:.1f}", "VA", "Calculated as √(P² + Q²)", Theme.PURPLE)
-        self.card_pf.set(f"{sample.pf:.3f}", "", "True PF, including THD", pf_accent)
+        self.card_pf.set(f"{sample.pf:.3f}", "", "True PF, including harmonic distortion", pf_accent)
         self.card_f.set(f"{sample.frequency:.2f}", "Hz", f"Δ vs 60 Hz: {sample.frequency - NOMINAL_FREQ_HZ:+.2f} Hz")
 
         if sample.energy_wh >= 1000.0:
@@ -1203,7 +1203,7 @@ class PowerTrianglePanel(tk.Frame):
             c.create_rectangle(s_x - 46, s_y - 14, s_x + 46, s_y + 14, fill=Theme.PANEL, outline=Theme.PURPLE)
             c.create_text(s_x, s_y, text=s_text, fill=Theme.PURPLE, font=("Segoe UI", 9, "bold"))
 
-        self.summary.configure(text=f"Displacement PF={disp_pf:.3f} · φ={phi_deg:+.1f}° · from P, Q, S only · ignores harmonic distortion")
+        self.summary.configure(text=f"Displacement PF={disp_pf:.3f} · φ={phi_deg:+.1f}° · From P, Q, S only · Ignores harmonic distortion")
 
 
 class MiniMetric(tk.Frame):
