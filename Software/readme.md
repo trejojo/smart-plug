@@ -1,31 +1,63 @@
 # AYCE Smart Plug PC Software
 
-This package contains the PC-side software for the AYCE Smart Plug project.
+This folder contains the PC-side software for the AYCE Smart Plug project. It includes the live GUI, the reusable MQTT client, the BLE provisioning helper, and a launcher system that starts the local Mosquitto broker and the GUI together.
 
-Included tools:
+## Folder structure
 
-- `telemetry/smartplug_gui.py`: live MQTT dashboard with BLE provisioning access.
-- `telemetry/mqtt_client.py`: reusable MQTT client and optional console tool.
-- `telemetry/start_mosquitto.bat`: helper script to start the local Mosquitto broker.
-- `telemetry/start_gui.bat`: helper script to start the GUI.
-- `provisioning/provisioner.py`: BLE provisioning helper imported by the GUI.
-- `requirements.txt`: Python dependencies.
+```text
+Software/
+├─ README.md
+├─ requirements.txt
+├─ launchers/
+│  ├─ README.md
+│  ├─ start_ayce_system.bat
+│  ├─ Start-AyceSystem.ps1
+│  ├─ create_desktop_shortcut.ps1
+│  ├─ create_desktop_shortcut.bat
+│  └─ assets/
+│     └─ ayce_logo.ico
+├─ telemetry/
+│  ├─ README.md
+│  ├─ smartplug_gui.py
+│  ├─ mqtt_client.py
+│  └─ mosquitto.conf
+└─ provisioning/
+   ├─ README.md
+   └─ provisioner.py
+```
 
-The firmware-side `module_mqtt.c` belongs in the ESP32 firmware project, not in this `Software` folder. It is intentionally not included here.
+## What each folder does
 
-## 1. Create and activate the Python environment
+- **`launchers/`**: startup and desktop-shortcut helpers. This is the official entry point for normal use.
+- **`telemetry/`**: the GUI, MQTT logic, waveform/FFT processing, and local Mosquitto configuration.
+- **`provisioning/`**: BLE helper used to send Wi-Fi credentials to the AYCE ESP32.
 
-Open a terminal in the `Software` directory.
+## Before using the system
 
-PowerShell:
+Complete the following PC setup steps first.
 
-```powershell
-python -m venv .venv_pc
-.\.venv_pc\Scripts\Activate.ps1
+### 1) Install Python
+
+Install a recent Windows version of Python 3.
+
+### 2) Install Mosquitto MQTT Broker
+
+Install **Mosquitto** on Windows. The launcher looks for `mosquitto.exe` first in `PATH`, then in the common default locations:
+
+- `C:\Program Files\Mosquitto\mosquitto.exe`
+- `C:\Program Files (x86)\Mosquitto\mosquitto.exe`
+
+### 3) Install Python dependencies
+
+From the `Software` folder run either one of the following approaches.
+
+#### Option A: without a virtual environment
+
+```cmd
 pip install -r requirements.txt
 ```
 
-CMD:
+#### Option B: with a virtual environment
 
 ```cmd
 python -m venv .venv_pc
@@ -33,76 +65,79 @@ python -m venv .venv_pc
 pip install -r requirements.txt
 ```
 
-## 2. Start Mosquitto
+You do **not** need a virtual environment to use this project. The launcher supports both modes:
 
-Open a terminal in `Software\telemetry`:
+- If `.venv_pc` or `.venv` exists, it uses that Python first.
+- Otherwise, it uses the system Python installation.
 
-```cmd
-start_mosquitto.bat
-```
+### 4) Force the Wi-Fi adapter to prefer 2.4 GHz
 
-The default broker configuration listens on port `1883` and accepts anonymous local development connections.
+Because the ESP32 connects through **2.4 GHz Wi-Fi**, configure the PC wireless adapter accordingly.
 
-## 3. Run the GUI
+In Windows:
 
-Open another terminal in `Software\telemetry` with the same virtual environment active:
+1. Open **Device Manager**.
+2. Open **Network adapters**.
+3. Right-click your Wi-Fi adapter and open **Properties**.
+4. Open the **Advanced** tab.
+5. Set **Preferred Band** to **2.4 GHz**.
 
-```cmd
-python smartplug_gui.py
-```
+### 5) Create a Windows mobile hotspot in 2.4 GHz mode
 
-or:
+The AYCE device will connect to the hotspot whose credentials you send over BLE.
 
-```cmd
-start_gui.bat
-```
+In Windows:
 
-The GUI opens maximized by default, connects to the configured MQTT broker and waits for `smartplug/telemetry/status`. Once telemetry is received, it switches to the main dashboard. If telemetry stops for more than 3 seconds, the GUI returns to the provisioning/reconnection screen using a local heartbeat watchdog. This intentionally does not depend on the MQTT disconnect callback, because the PC can remain connected to Mosquitto while the ESP32 is powered off, rebooting or in BLE pairing mode.
+1. Open **Settings**.
+2. Go to **Network & Internet**.
+3. Open **Mobile hotspot**.
+4. Enable hotspot sharing over **Wi-Fi**.
+5. Set the hotspot **Band** to **2.4 GHz**.
+6. Set the hotspot **Name** and **Password** to the exact credentials you want to send to AYCE over BLE.
 
-## 4. BLE provisioning
+> Important: the hotspot SSID and password configured on the PC must match the credentials sent to the AYCE device during BLE provisioning.
 
-The GUI can send WiFi credentials over BLE using the same provisioning helper used by the standalone script.
+## Normal startup workflow
 
-Default values currently shown by the GUI:
+For normal use, the recommended startup flow is:
 
-```text
-SSID: AYCE_HS
-Password: Bake_This
-Broker: 192.168.137.1
-Port: 1883
-BLE MAC: E0:72:A1:CE:A3:8A
-```
+1. Create the desktop shortcut once using `launchers/create_desktop_shortcut.bat` or `launchers/create_desktop_shortcut.ps1`.
+2. Use the generated **AYCE Smart Plug** desktop shortcut from then on.
+3. Each time you open that shortcut:
+   - a **visible Mosquitto broker console** opens,
+   - the **GUI starts without a Python console**,
+   - the launcher supervises both processes.
 
-The BLE provisioning helper keeps the working firmware flow: by default it sends the WiFi credentials expected by the ESP32 provisioning service. The broker IP and port are used by the PC GUI to reconnect to the Mosquitto broker after provisioning.
+### Coupled shutdown behavior
 
-## 5. MQTT topic contract
+The launcher supervises only the processes it started.
 
-### ESP32 -> PC
+- If you close the **GUI**, the launcher closes the Mosquitto broker console it started.
+- If you close the **broker console**, the launcher closes the GUI it started.
 
-```text
-smartplug/telemetry/status
-smartplug/telemetry/temperature
-smartplug/telemetry/energy
-smartplug/events/protection
-smartplug/state/relay
-smartplug/state/led
-smartplug/commands/ack
-smartplug/waveform/data
-```
+This keeps normal startup and shutdown simple while avoiding interference with unrelated external processes.
 
-### PC -> ESP32
+## BLE provisioning flow
 
-```text
-smartplug/commands/relay
-smartplug/commands/config
-smartplug/waveform/request
-```
+The GUI starts in the provisioning / reconnection phase until status telemetry is received.
 
-The PC parser still accepts older development aliases for transition/testing, but the GUI publishes the standardized topics above.
+Typical flow:
 
-## 6. Waveform capture
+1. Open the system using the desktop shortcut.
+2. Make sure the Windows mobile hotspot is active in **2.4 GHz** mode.
+3. In the GUI provisioning screen, enter:
+   - Wi-Fi SSID
+   - Wi-Fi password
+   - broker IP / hostname
+   - broker port
+   - AYCE BLE MAC address
+4. Send credentials over BLE.
+5. The ESP32 connects to the hotspot and then to the local MQTT broker.
+6. Once status telemetry starts arriving, the GUI switches to the main dashboard.
 
-The GUI requests one fixed waveform capture per request:
+## Waveform capture contract
+
+The GUI and console tool use the fixed capture request:
 
 ```text
 512 samples @ 2400 Hz
@@ -114,43 +149,51 @@ This corresponds to approximately:
 213.33 ms, or about 12.80 cycles at 60 Hz
 ```
 
-The GUI computes FFT, THD, phase angle and time shift locally from the received waveform samples. In `Both` mode, the instantaneous waveform and harmonic spectrum use independent voltage/current Y axes so V and A can be read correctly.
+## Recommended first test
 
-## 7. CSV export
+1. Install Mosquitto.
+2. Install Python dependencies.
+3. Configure the Wi-Fi adapter preferred band to **2.4 GHz**.
+4. Configure and enable the Windows mobile hotspot in **2.4 GHz** mode.
+5. Create the desktop shortcut.
+6. Open the desktop shortcut.
+7. Use BLE provisioning if needed.
+8. Wait for `smartplug/telemetry/status` telemetry.
+9. Test relay control, safety limits, and waveform capture.
 
-The GUI can export three CSV files using a file-save dialog:
+## Quick troubleshooting
 
-- Main metrics CSV from the main dashboard.
-- Sample table CSV from the waveform sample table window.
-- FFT table CSV from the FFT harmonic table window.
+### The GUI does not start
 
-Each export includes local save timestamps and, when available, the measurement/capture timestamp.
+Check that:
 
-## 8. Recommended test sequence
+- Python is installed.
+- `paho-mqtt` and `bleak` are installed.
+- `smartplug_gui.py` is present in `telemetry/`.
 
-1. Start Mosquitto using `telemetry\start_mosquitto.bat`.
-2. Run `telemetry\smartplug_gui.py`.
-3. Energize the ESP32 Smart Plug.
-4. If needed, use the GUI BLE provisioning screen and send credentials.
-5. Wait for `smartplug/telemetry/status`; the GUI will switch to the main dashboard.
-6. Test relay ON/OFF.
-7. Test safety limits.
-8. Request waveform; the GUI should plot 512 samples and update FFT/THD/phase metrics.
-9. Test CSV export buttons.
-10. Power off or reset the ESP32; after about 3 seconds without telemetry, the GUI should return to the provisioning/reconnection screen.
+### The broker console does not start
 
-## 9. Optional console testing
+Check that:
 
-```cmd
-cd telemetry
-python mqtt_client.py --broker 192.168.137.1 --port 1883
-```
+- Mosquitto is installed.
+- `mosquitto.exe` is in `PATH` or in the default install folder.
+- `telemetry/mosquitto.conf` exists.
 
-Then use:
+### AYCE does not connect
 
-```text
-relay on
-relay off
-set 135.0 5.0
-wave
-```
+Check that:
+
+- the PC hotspot is enabled,
+- the hotspot is set to **2.4 GHz**,
+- the SSID and password sent over BLE exactly match the hotspot,
+- the broker IP/host entered in the GUI matches the PC running Mosquitto.
+
+### A teammate uses a virtual environment and I do not
+
+That is supported. The launcher automatically prefers `.venv_pc` or `.venv` when they exist, and otherwise falls back to the system Python installation.
+
+## Additional documentation
+
+- `launchers/README.md`
+- `telemetry/README.md`
+- `provisioning/README.md`
