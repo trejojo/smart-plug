@@ -908,6 +908,24 @@ static void setup_button_init(gpio_num_t gpio_num)
     ESP_ERROR_CHECK(gpio_config(&button_cfg));
 }
 
+/**
+ * @brief Main system initialization entry point and primary executive loop for AICE SmartPlug.
+ *
+ * This function orchestrates the complete boot, provisioning, and execution flow of the plug.
+ * It operates across two distinct lifecycle phases:
+ * * PHASE 1: HARDWARE & STACK INITIALIZATION (Synchronous)
+ * - Fetches pin configurations and logs hardware initialization vectors.
+ * - Starts internal subsystems sequentially (Relay, LED, TMP102, NVS).
+ * - Examines NVS for Wi-Fi configurations; if missing, falls back to BLE provisioning mode.
+ * - Configures scale multipliers for the ADE7953 DSP and sets emergency limits.
+ * - Spawns background FreeRTOS workers (LED control and Waveform capturing tasks).
+ * * PHASE 2: PRIMARY STATE MACHINE LOOP (Asynchronous, 100ms Base Clock)
+ * - Fast Path (100ms): Polls the physical push-button to detect state toggles or long factory resets.
+ * - Interrupt Hook (Asynchronous): Checks task notification flags raised by the ADE ISR to flag
+ * and lock hardware safety trips immediately.
+ * - Slow Path (1000ms): Queries sensors (temperature/power metrics), drives network connection 
+ * retries, processes pending MQTT command packets, and pushes out status telemetry payloads.
+ */
 void app_main(void)
 {
     const smartplug_board_pins_t *pins = smartplug_board_pins_get();
