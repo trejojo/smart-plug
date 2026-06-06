@@ -714,7 +714,9 @@ class HeaderBar(tk.Frame):
             relief="flat", font=("Segoe UI", 9, "bold"), padx=10, pady=5,
             command=app.save_metrics_csv,
         )
-        self.save_metrics_btn.pack(side="left", padx=(18, 0), pady=(4, 0))
+        # This button is intentionally shown only on the main dashboard phase.
+        # It is hidden during BLE provisioning/reconnection because no live
+        # dashboard metrics are expected to be available there.
 
         tk.Label(left, text="Live MQTT dashboard · BLE provisioning",
                  bg=Theme.BG, fg=Theme.MUTED, font=("Segoe UI", 10)).pack(anchor="w")
@@ -734,6 +736,14 @@ class HeaderBar(tk.Frame):
         self.clock_label.configure(text=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         self.after(1000, self._tick_clock)
 
+    def _set_save_metrics_visible(self, visible: bool) -> None:
+        if visible:
+            if not self.save_metrics_btn.winfo_ismapped():
+                self.save_metrics_btn.pack(side="left", padx=(18, 0), pady=(4, 0))
+        else:
+            if self.save_metrics_btn.winfo_ismapped():
+                self.save_metrics_btn.pack_forget()
+
     def _dev_btn(self, parent: tk.Widget, text: str, command: Callable[[], None]) -> None:
         tk.Button(parent, text=text, bg=Theme.PANEL_2, fg=Theme.MUTED, activebackground=Theme.CARD_HOVER,
                   activeforeground=Theme.TEXT, relief="flat", font=("Segoe UI", 7), padx=6, pady=2,
@@ -747,10 +757,13 @@ class HeaderBar(tk.Frame):
         }.get(phase, phase.upper())
         self.phase_badge.configure(text=readable)
         if phase == PHASE_DASHBOARD:
+            self._set_save_metrics_visible(True)
             self.connection_badge.configure(text="MQTT: CONNECTED", fg=Theme.GOOD)
         elif phase == PHASE_RECONNECTING:
+            self._set_save_metrics_visible(False)
             self.connection_badge.configure(text="MQTT: WAITING FOR DEVICE", fg=Theme.WARN)
         else:
+            self._set_save_metrics_visible(False)
             self.connection_badge.configure(text="MQTT: NOT CONNECTED", fg=Theme.BAD)
 
 
@@ -772,7 +785,7 @@ class ProvisioningFrame(tk.Frame):
                          highlightthickness=1, padx=24, pady=22)
         right.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
 
-        tk.Label(left, text="Provisioning BLE", bg=Theme.PANEL, fg=Theme.TEXT,
+        tk.Label(left, text="BLE Provisioning", bg=Theme.PANEL, fg=Theme.TEXT,
                  font=("Segoe UI", 22, "bold")).pack(anchor="w")
         self.status_label = tk.Label(
             left,
@@ -800,18 +813,14 @@ class ProvisioningFrame(tk.Frame):
                   bg=Theme.ACCENT, fg=Theme.BLACK, activebackground=Theme.ACCENT_2,
                   relief="flat", font=("Segoe UI", 10, "bold"), padx=12, pady=8,
                   command=self._send_ble_credentials).pack(side="left")
-        tk.Button(btns, text="View MQTT setup instructions", bg=Theme.PANEL_2, fg=Theme.TEXT,
-                  activebackground=Theme.CARD_HOVER, relief="flat", padx=12, pady=8,
-                  command=self._open_mqtt_instructions).pack(side="left", padx=(10, 0))
-
         tk.Label(right, text="What is happening", bg=Theme.PANEL, fg=Theme.TEXT,
                  font=("Segoe UI", 18, "bold")).pack(anchor="w")
         instructions = (
-            "1. Energiza el Smart Plug.\n"
+            "1. Power the Smart Plug.\n"
             "2. If it does not have credentials yet, it should advertise over BLE.\n"
-            "3. The GUI sends SSID, password and broker information to the device.\n"
+            "3. The GUI sends the SSID, password and broker information to the device.\n"
             "4. The ESP32 restarts WiFi and stops using BLE.\n"
-            "5. Once MQTT connects, the GUI switches to the main dashboard.\n\n"
+            "5. Once MQTT telemetry is received, the GUI switches to the main dashboard.\n\n"
             "Keep this window open until the first smartplug/telemetry/status packet is received."
         )
         tk.Label(right, text=instructions, bg=Theme.PANEL, fg=Theme.MUTED,
@@ -849,48 +858,6 @@ class ProvisioningFrame(tk.Frame):
             broker_port=safe_int(self.port_var.get(), DEFAULT_MQTT_PORT),
             mac=self.mac_var.get().strip(),
         )
-
-    def _open_mqtt_instructions(self) -> None:
-        win = tk.Toplevel(self)
-        win.title("MQTT Setup Instructions")
-        win.geometry("760x560")
-        win.configure(bg=Theme.BG)
-        tk.Label(win, text="Basic MQTT setup for testing",
-                 bg=Theme.BG, fg=Theme.TEXT, font=("Segoe UI", 18, "bold")).pack(anchor="w", padx=20, pady=(18, 8))
-        text = tk.Text(win, bg=Theme.PANEL, fg=Theme.TEXT, insertbackground=Theme.TEXT,
-                       relief="flat", wrap="word", font=("Consolas", 10), padx=14, pady=14)
-        text.pack(expand=True, fill="both", padx=20, pady=(0, 20))
-        instructions = """
-PC / local broker guide
-
-1) Install Python dependencies:
-   pip install bleak==0.21.1 paho-mqtt==1.6.1
-
-2) Install Mosquitto MQTT broker.
-
-3) Minimum Mosquitto configuration for local testing:
-   listener 1883
-   allow_anonymous true
-
-4) Verify that the broker is listening on the IP address sent over BLE.
-   En muchos hotspots de Windows puede usarse una IP como 192.168.137.1.
-
-5) Expected flow:
-   GUI -> BLE -> ESP32: WiFi credentials
-   ESP32: restarts WiFi and connects to the MQTT broker
-   ESP32 -> MQTT -> GUI: smartplug/telemetry/status
-
-6) Standard MQTT topics:
-   Telemetry: smartplug/telemetry/status
-   Relay command: smartplug/commands/relay
-   Safety config: smartplug/commands/config
-   Waveform request/data: smartplug/waveform/request, smartplug/waveform/data
-
-Troubleshooting: check Windows firewall, broker IP, hotspot IP and port 1883.
-""".strip()
-        text.insert("1.0", instructions)
-        text.configure(state="disabled")
-
 
 class DashboardFrame(tk.Frame):
     def __init__(self, parent: tk.Widget, app: "SmartPlugApp"):
