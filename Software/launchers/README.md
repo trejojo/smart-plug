@@ -8,8 +8,8 @@ This folder contains the official AYCE PC startup helpers.
 |---|---|
 | `create_desktop_shortcut.bat` | Recommended one-time shortcut installer for Windows users. |
 | `create_desktop_shortcut.ps1` | PowerShell implementation that creates the desktop shortcut. |
+| `start_ayce_system_hidden.vbs` | Hidden Windows Script Host launcher used by the desktop shortcut. |
 | `Start-AyceSystem.ps1` | Hidden supervisor that starts and monitors the broker and GUI. |
-| `start_ayce_system.bat` | Manual fallback launcher. The desktop shortcut does not point to this file anymore. |
 
 The shared icon is stored outside this folder:
 
@@ -34,13 +34,13 @@ This creates a desktop shortcut named:
 AYCE Smart Plug
 ```
 
-The shortcut launches hidden PowerShell directly:
+The shortcut launches:
 
 ```text
-powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File Start-AyceSystem.ps1
+wscript.exe //B //Nologo start_ayce_system_hidden.vbs
 ```
 
-This is intentional. It prevents an extra empty launcher console from staying open while the GUI and broker are running.
+The VBS launcher then starts `Start-AyceSystem.ps1` hidden. This avoids the extra empty Windows Terminal / PowerShell console that can appear when PowerShell is used directly as the shortcut target on Windows 11.
 
 ### Everyday use
 
@@ -88,12 +88,7 @@ This is more robust than closing only the direct parent process.
 
 ## Why both `.ps1` and `.bat` exist
 
-The PowerShell scripts contain the real logic.
-
-The `.bat` files are convenience wrappers for Windows users:
-
-- `create_desktop_shortcut.bat` is the recommended way to create the shortcut.
-- `start_ayce_system.bat` is kept only as a manual fallback.
+The PowerShell script contains the real shortcut-creation logic. The `.bat` wrapper exists so Windows users can create the desktop shortcut with a simple double-click.
 
 ## If a virtual environment exists
 

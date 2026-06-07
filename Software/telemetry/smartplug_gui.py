@@ -40,6 +40,12 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 
+# Allow running this file directly from Software/telemetry while importing
+# Software/provisioning/provisioner.py and loading shared assets.
+SOFTWARE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ASSETS_DIR = os.path.join(SOFTWARE_DIR, "assets")
+AYCE_ICON_ICO = os.path.join(ASSETS_DIR, "ayce_logo.ico")
+AYCE_ICON_PNG = os.path.join(ASSETS_DIR, "ayce_logo.png")
 
 def configure_windows_dpi_awareness() -> None:
     """Keep the GUI visually close to the 100% Windows scale design.
@@ -77,28 +83,17 @@ def configure_tk_100_percent_scaling(root: tk.Tk) -> None:
     except tk.TclError:
         pass
 
-# Allow running this file directly from Software/telemetry while importing
-# Software/provisioning/provisioner.py.
-SOFTWARE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-ASSETS_DIR = os.path.join(SOFTWARE_DIR, "assets")
-AYCE_ICON_ICO = os.path.join(ASSETS_DIR, "ayce_logo.ico")
-AYCE_ICON_PNG = os.path.join(ASSETS_DIR, "ayce_logo.png")
-
 if SOFTWARE_DIR not in sys.path:
     sys.path.insert(0, SOFTWARE_DIR)
 
 
 def configure_window_icon(root: tk.Tk) -> None:
-    """Apply the shared AYCE icon to the Tk window and Windows taskbar."""
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AYCE.SmartPlug.Dashboard")
-        except Exception:
-            pass
+    """Apply the shared AYCE icon to the Tk window/title bar."""
     try:
         if os.path.exists(AYCE_ICON_ICO):
             root.iconbitmap(AYCE_ICON_ICO)
+            root.iconbitmap(default=AYCE_ICON_ICO)
+            root.wm_iconbitmap(AYCE_ICON_ICO)
     except tk.TclError:
         pass
     try:
@@ -1903,6 +1898,7 @@ class SmartPlugApp:
         except tk.TclError:
             # Some non-Windows Tk builds do not support the zoomed state.
             pass
+
 
         self.incoming_queue: "queue.Queue[Tuple[str, str]]" = queue.Queue()
         self.router = MessageRouter(self)
