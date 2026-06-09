@@ -1,6 +1,6 @@
 # AYCE Smart Plug PC Software
 
-This folder contains the PC-side software for the AYCE Smart Plug project. It includes the live GUI, the reusable MQTT client, the BLE provisioning helper, and a launcher system that starts or reuses the local Mosquitto broker and opens the GUI.
+This folder contains the PC-side software for the AYCE Smart Plug project. It includes the live GUI, the reusable MQTT client, the BLE provisioning helper, shared assets, and a launcher system that starts the local Mosquitto broker and the GUI together.
 
 ## Folder structure
 
@@ -13,11 +13,10 @@ Software/
 │  └─ ayce_logo.png
 ├─ launchers/
 │  ├─ README.md
-│  ├─ start_ayce_system_hidden.vbs
-│  ├─ Start-AyceSystem.ps1
-│  ├─ create_desktop_shortcut.ps1
 │  ├─ create_desktop_shortcut.bat
-│  └─ start_ayce_system.bat
+│  ├─ create_desktop_shortcut.ps1
+│  ├─ start_ayce_system_hidden.vbs
+│  └─ Start-AyceSystem.ps1
 ├─ telemetry/
 │  ├─ README.md
 │  ├─ smartplug_gui.py
@@ -30,9 +29,9 @@ Software/
 
 ## What each folder does
 
-- **`assets/`**: shared AYCE icon files. Both the desktop shortcut and the Tkinter GUI use the same icon.
+- **`assets/`**: shared AYCE icon files used by the desktop shortcut and the GUI window/title bar.
 - **`launchers/`**: startup and desktop-shortcut helpers. This is the official entry point for normal use.
-- **`telemetry/`**: the GUI, MQTT logic, waveform/FFT processing, and local Mosquitto configuration.
+- **`telemetry/`**: the GUI, MQTT logic, waveform/FFT processing, true apparent power display using `apparent_power`, and local Mosquitto configuration.
 - **`provisioning/`**: BLE helper used to send Wi-Fi credentials to the AYCE ESP32.
 
 ## Before using the system
@@ -102,34 +101,27 @@ In Windows:
 
 ## Normal startup workflow
 
-For normal use, the recommended startup flow is:
+For normal use:
 
 1. Run `launchers/create_desktop_shortcut.bat` once.
 2. Use the generated **AYCE Smart Plug** desktop shortcut from then on.
 
 Each time you open that desktop shortcut:
 
-- a **visible Mosquitto broker console** opens when the launcher starts Mosquitto itself,
-- if Mosquitto is already running on port `1883`, the launcher uses that existing broker and opens only the GUI,
+- a **visible Mosquitto broker console** opens,
 - the **GUI starts without a Python console**,
-- the shortcut and GUI use the shared AYCE icon,
 - the hidden PowerShell supervisor monitors both processes.
 
-### Why the extra empty launcher console should not appear
+The shortcut uses `wscript.exe` and `launchers/start_ayce_system_hidden.vbs` to start the supervisor without leaving an extra empty console open.
 
-The desktop shortcut launches `start_ayce_system_hidden.vbs` through `wscript.exe`. That hidden helper starts the PowerShell supervisor without leaving an extra empty launcher console next to the broker console and GUI.
+### Coupled shutdown behavior
 
-`start_ayce_system.bat` remains available only as a manual fallback.
+The launcher supervises only the processes it started.
 
-### Broker detection and shutdown behavior
+- If you close the **GUI**, the launcher closes the Mosquitto broker console and its process tree.
+- If you close the **broker console**, the launcher closes the GUI process tree.
 
-The launcher checks port `1883` before starting Mosquitto.
-
-- If port `1883` is free, the launcher starts its own visible **AYCE MQTT Broker** console. Closing the GUI closes that broker console and its process tree. Closing that broker console closes the GUI process tree.
-- If port `1883` is already used by `mosquitto.exe`, usually because Mosquitto started as a Windows service after reboot, the launcher uses that existing broker and does **not** open or close an extra broker console.
-- If port `1883` is used by another process, the launcher stops and shows an error.
-
-When the launcher starts its own broker, cleanup uses Windows `taskkill /PID <pid> /T /F` so child processes are also closed.
+The cleanup uses Windows `taskkill /PID <pid> /T /F` so child processes are also closed.
 
 ## BLE provisioning flow
 
@@ -149,30 +141,6 @@ Typical flow:
 5. The ESP32 connects to the hotspot and then to the local MQTT broker.
 6. Once status telemetry starts arriving, the GUI switches to the main dashboard.
 
-## Main telemetry payload
-
-The GUI expects `apparent_power` inside the existing `smartplug/telemetry/status` payload. No new MQTT topic is required.
-
-Expected fields include:
-
-```json
-{
-  "vrms": 129.80,
-  "irms": 0.551,
-  "active_power": 36.60,
-  "reactive_power": -13.50,
-  "apparent_power": 70.25,
-  "pf": -0.512,
-  "frequency": 60.00,
-  "energy_wh": 67.09,
-  "tmp_c": 43.10,
-  "relay": true,
-  "no_load": false
-}
-```
-
-`apparent_power` is the true apparent power in VA from the ADE7953 and includes harmonic distortion. The GUI does not calculate this value from `sqrt(P² + Q²)` anymore.
-
 ## Waveform capture contract
 
 The GUI and console tool use the fixed capture request:
@@ -187,13 +155,13 @@ This corresponds to approximately:
 213.33 ms, or about 12.80 cycles at 60 Hz
 ```
 
-The displayed THD values include harmonics up to the 20th.
-
 ## Power triangle behavior
 
 The power triangle shape is still animated smoothly for a better visual transition. The numeric labels for **P**, **Q**, and **S** update immediately from the latest telemetry so they stay readable even when the measurements change quickly.
 
-The triangle geometry still uses **P** and **Q** only. The visual hypotenuse is based on the P-Q geometry, while the displayed **S** label uses true apparent power from `apparent_power`, including harmonics.
+## GUI icon behavior
+
+The GUI loads the shared AYCE icon from `Software/assets/` for the Tkinter window/title bar. The Windows taskbar can still show the Python icon because the GUI runs through `pythonw.exe`; this version intentionally avoids extra Win32/AppUserModelID taskbar-forcing code.
 
 ## About `__pycache__`
 
@@ -205,7 +173,7 @@ This package does not include `__pycache__` folders. The launcher sets:
 PYTHONDONTWRITEBYTECODE=1
 ```
 
-and runs the GUI with `python -B` / `pythonw -B` behavior to avoid creating project `__pycache__` folders during normal launcher-based use.
+and starts the GUI with Python's `-B` option to avoid creating project `__pycache__` folders during normal launcher-based use.
 
 If you run scripts manually without `-B`, Python may create `__pycache__` again. It is safe to delete those folders.
 
@@ -233,66 +201,11 @@ Check that:
 
 ### The broker console does not start
 
-This can be normal if Mosquitto is already running as a Windows service. In that case, the launcher reuses the existing broker and opens only the GUI.
-
-To check whether something is already listening on port `1883`:
-
-```cmd
-netstat -ano | findstr :1883
-```
-
-If no broker is already running and the launcher must start Mosquitto itself, check that:
+Check that:
 
 - Mosquitto is installed.
 - `mosquitto.exe` is in `PATH` or in the default install folder.
 - `telemetry/mosquitto.conf` exists.
-
-If port `1883` is occupied by something other than `mosquitto.exe`, the launcher will stop and show an error.
-
-
-### Error after reboot: `Mosquitto closed immediately`
-
-If a launcher version tries to start Mosquitto and shows this message:
-
-```text
-Mosquitto closed immediately. Check whether port 1883 is already in use or whether mosquitto.conf is valid.
-```
-
-the most common cause is that **Mosquitto was already started automatically by Windows as a service** during boot. In that situation, port `1883` is already occupied, so a second Mosquitto instance cannot bind to the same port and closes immediately.
-
-Confirm the cause with:
-
-```cmd
-netstat -ano | findstr :1883
-```
-
-Then check which process owns the PID shown in the last column:
-
-```cmd
-tasklist /FI "PID eq <PID>"
-```
-
-If the process is `mosquitto.exe`, the broker is already running.
-
-Recommended AYCE setup: set the Mosquitto Windows service to **Manual** instead of **Automatic**. This lets the AYCE launcher control when the broker starts and stops.
-
-Option A, using Windows Services:
-
-1. Press `Win + R`.
-2. Run `services.msc`.
-3. Find **Mosquitto Broker** or **mosquitto**.
-4. Stop the service if it is running.
-5. Open **Properties**.
-6. Set **Startup type** to **Manual**.
-
-Option B, using Command Prompt as Administrator:
-
-```cmd
-sc stop mosquitto
-sc config mosquitto start= demand
-```
-
-After this, restart the AYCE desktop shortcut. If Mosquitto is not already running, the launcher will open the visible **AYCE MQTT Broker** console itself.
 
 ### AYCE does not connect
 
@@ -312,3 +225,23 @@ That is supported. The launcher automatically prefers `.venv_pc` or `.venv` when
 - `launchers/README.md`
 - `telemetry/README.md`
 - `provisioning/README.md`
+
+## Mosquitto service starts automatically
+
+If Windows starts Mosquitto automatically after reboot, port `1883` may already be occupied before the AYCE launcher starts. The launcher expects to control the broker instance it opens. The recommended setup is to leave the Mosquitto Windows service in **Manual** startup mode.
+
+Check the port owner:
+
+```cmd
+netstat -ano | findstr :1883
+tasklist /FI "PID eq <PID>"
+```
+
+Set Mosquitto to manual startup from an administrator CMD:
+
+```cmd
+sc stop mosquitto
+sc config mosquitto start= demand
+```
+
+You can also use `services.msc`, open the Mosquitto service properties, stop it, and set **Startup type** to **Manual**.

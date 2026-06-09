@@ -9,8 +9,7 @@ This folder contains the official AYCE PC startup helpers.
 | `create_desktop_shortcut.bat` | Recommended one-time shortcut installer for Windows users. |
 | `create_desktop_shortcut.ps1` | PowerShell implementation that creates the desktop shortcut. |
 | `start_ayce_system_hidden.vbs` | Hidden Windows Script Host launcher used by the desktop shortcut. |
-| `Start-AyceSystem.ps1` | Hidden PowerShell supervisor that starts/reuses the broker and opens the GUI. |
-| `start_ayce_system.bat` | Manual fallback launcher. The desktop shortcut does not point to this file. |
+| `Start-AyceSystem.ps1` | Hidden supervisor that starts and monitors the broker and GUI. |
 
 The shared icon is stored outside this folder:
 
@@ -38,10 +37,10 @@ AYCE Smart Plug
 The shortcut launches:
 
 ```text
-wscript.exe start_ayce_system_hidden.vbs
+wscript.exe //B //Nologo start_ayce_system_hidden.vbs
 ```
 
-The VBS helper then starts the PowerShell supervisor hidden. This avoids leaving an extra empty launcher console visible next to the broker and GUI.
+The VBS launcher then starts `Start-AyceSystem.ps1` hidden. This avoids the extra empty Windows Terminal / PowerShell console that can appear when PowerShell is used directly as the shortcut target on Windows 11.
 
 ### Everyday use
 
@@ -49,10 +48,9 @@ Double-click the **AYCE Smart Plug** desktop shortcut.
 
 Expected result:
 
-1. If port `1883` is free, one visible console named **AYCE MQTT Broker** opens for Mosquitto logs.
-2. If port `1883` is already used by `mosquitto.exe`, usually because Mosquitto started as a Windows service after reboot, no broker console is opened; the GUI uses that existing broker.
-3. The GUI opens without a separate Python console.
-4. The hidden supervisor monitors the processes it started.
+1. One visible console named **AYCE MQTT Broker** opens for Mosquitto logs.
+2. The GUI opens without a separate Python console.
+3. The hidden supervisor monitors both processes.
 
 ## What `Start-AyceSystem.ps1` does
 
@@ -67,21 +65,20 @@ The supervisor performs the following steps:
 4. Verifies required Python modules:
    - `paho-mqtt`
    - `bleak`
-5. Checks whether TCP port `1883` is already listening.
-6. If port `1883` is used by `mosquitto.exe`, it reuses that existing broker.
-7. If port `1883` is free, it locates `mosquitto.exe` and starts a visible **AYCE MQTT Broker** console.
-8. Starts the GUI using **`pythonw.exe -B`** so there is **no Python console window**.
-9. Monitors the GUI and, when applicable, the broker process started by the launcher.
+5. Locates `mosquitto.exe`.
+6. Starts the broker in a **visible console window**.
+7. Starts the GUI using **`pythonw.exe -B`** so there is **no Python console window**.
+8. Monitors both processes.
+9. If one is closed, it closes the other using process-tree cleanup.
 
-## Broker detection and shutdown behavior
+## Shutdown behavior
 
 The launcher supervises only the processes it started.
 
-- **Launcher-started broker:** closing the GUI closes the broker console and child processes. Closing the broker console closes the GUI process.
-- **Existing Mosquitto broker:** if port `1883` is already occupied by `mosquitto.exe`, the launcher uses it and does not close it when the GUI exits.
-- **Other process on port 1883:** if port `1883` is occupied by something other than Mosquitto, the launcher stops and shows an error.
+- Closing the GUI closes the broker console and child processes.
+- Closing the broker console closes the GUI process.
 
-When the launcher starts its own broker, cleanup uses:
+Cleanup uses:
 
 ```text
 taskkill /PID <pid> /T /F
@@ -89,13 +86,9 @@ taskkill /PID <pid> /T /F
 
 This is more robust than closing only the direct parent process.
 
-## Why `.vbs`, `.ps1`, and `.bat` all exist
+## Why both `.ps1` and `.bat` exist
 
-The PowerShell script contains the real launcher logic. The VBS helper allows the desktop shortcut to start PowerShell hidden without showing an extra empty console. The `.bat` files are convenience wrappers for Windows users.
-
-- `create_desktop_shortcut.bat` is the recommended way to create the shortcut.
-- `start_ayce_system_hidden.vbs` is used by the generated desktop shortcut.
-- `start_ayce_system.bat` is kept only as a manual fallback.
+The PowerShell script contains the real shortcut-creation logic. The `.bat` wrapper exists so Windows users can create the desktop shortcut with a simple double-click.
 
 ## If a virtual environment exists
 
@@ -118,62 +111,9 @@ Run `create_desktop_shortcut.bat` instead of double-clicking the `.ps1` file.
 Check:
 
 - Python installation
-- Mosquitto installation, unless Mosquitto is already running as a service
+- Mosquitto installation
 - `requirements.txt` dependencies installed
-- Windows Script Host and PowerShell not blocked by local policy
-
-### No broker console appears
-
-This can be normal. If Mosquitto is already running on port `1883`, the launcher uses that existing broker and opens only the GUI.
-
-To check manually:
-
-```cmd
-netstat -ano | findstr :1883
-```
-
-
-### `Mosquitto closed immediately` after reboot
-
-This message means the launcher attempted to start Mosquitto, but the broker process closed immediately:
-
-```text
-Mosquitto closed immediately. Check whether port 1883 is already in use or whether mosquitto.conf is valid.
-```
-
-The usual cause is not the GUI or firmware. It is that Windows already started Mosquitto as a background service at boot, so port `1883` is already occupied.
-
-Check port `1883`:
-
-```cmd
-netstat -ano | findstr :1883
-```
-
-Then identify the process:
-
-```cmd
-tasklist /FI "PID eq <PID>"
-```
-
-If it is `mosquitto.exe`, the broker is already running. For the AYCE workflow, the cleanest setup is to make the Mosquitto service **Manual** instead of **Automatic**, so the AYCE launcher can start the visible broker console when needed.
-
-Using Windows Services:
-
-1. Press `Win + R`.
-2. Run `services.msc`.
-3. Find **Mosquitto Broker** or **mosquitto**.
-4. Click **Stop** if it is running.
-5. Open **Properties**.
-6. Set **Startup type** to **Manual**.
-
-Using Command Prompt as Administrator:
-
-```cmd
-sc stop mosquitto
-sc config mosquitto start= demand
-```
-
-Then close any old AYCE windows and open the **AYCE Smart Plug** desktop shortcut again.
+- PowerShell not blocked by local policy
 
 ### The broker console opens but the GUI does not
 
@@ -182,3 +122,16 @@ Most likely a missing Python dependency. From the `Software` folder run:
 ```cmd
 pip install -r requirements.txt
 ```
+
+## If Mosquitto is already running after reboot
+
+The AYCE launcher normally starts its own visible broker console. If Mosquitto was installed as an automatic Windows service, it may already occupy port `1883` after reboot and prevent the launcher from starting its controlled broker instance.
+
+Recommended fix: set the Mosquitto service to **Manual**.
+
+```cmd
+sc stop mosquitto
+sc config mosquitto start= demand
+```
+
+The same can be done from `services.msc` by changing the Mosquitto service startup type to **Manual**.

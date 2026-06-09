@@ -47,6 +47,42 @@ ASSETS_DIR = os.path.join(SOFTWARE_DIR, "assets")
 AYCE_ICON_ICO = os.path.join(ASSETS_DIR, "ayce_logo.ico")
 AYCE_ICON_PNG = os.path.join(ASSETS_DIR, "ayce_logo.png")
 
+def configure_windows_dpi_awareness() -> None:
+    """Keep the GUI visually close to the 100% Windows scale design.
+
+    Windows can bitmap-scale non-DPI-aware Tkinter apps at 125%/150%, which
+    makes the dashboard too large and can clip panels. Declaring the process as
+    DPI-aware prevents that OS-level enlargement. The Tk scaling value is fixed
+    later, after creating ``tk.Tk()``, to the 96 DPI / 100% baseline.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+    except Exception:
+        return
+
+    # Prefer system-DPI awareness for predictable desktop-dashboard sizing.
+    # The calls can fail if another library already set DPI awareness; that is
+    # harmless, so failures are intentionally ignored.
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def configure_tk_100_percent_scaling(root: tk.Tk) -> None:
+    """Normalize Tk font/widget scaling to the 100% Windows design baseline."""
+    try:
+        root.tk.call("tk", "scaling", TK_100_PERCENT_SCALING)
+    except tk.TclError:
+        pass
+
 if SOFTWARE_DIR not in sys.path:
     sys.path.insert(0, SOFTWARE_DIR)
 
@@ -55,7 +91,9 @@ def configure_window_icon(root: tk.Tk) -> None:
     """Apply the shared AYCE icon to the Tk window/title bar."""
     try:
         if os.path.exists(AYCE_ICON_ICO):
+            root.iconbitmap(AYCE_ICON_ICO)
             root.iconbitmap(default=AYCE_ICON_ICO)
+            root.wm_iconbitmap(AYCE_ICON_ICO)
     except tk.TclError:
         pass
     try:
@@ -181,6 +219,7 @@ class TelemetrySample:
     relay: bool = False
     tmp_c: float = 0.0
     timestamp: str = ""
+
 
     @property
     def current_percent_nominal(self) -> float:
@@ -411,8 +450,8 @@ def phase_note_from_angle(phase_angle_deg: float, deadband_deg: float = 2.0) -> 
 def displacement_metrics_from_pq(active_power_w: float, reactive_power_var: float) -> Tuple[float, float, float]:
     """Return P-Q triangle apparent power, signed displacement PF and phi angle.
 
-    The sign convention follows the load type: positive for inductive Q,
-    negative for capacitive Q, and positive/normal for nearly resistive loads.
+    Sign convention: positive for inductive Q, negative for capacitive Q,
+    and positive/normal for nearly resistive loads.
     """
     p = safe_float(active_power_w)
     q = safe_float(reactive_power_var)
@@ -915,8 +954,7 @@ class DashboardFrame(tk.Frame):
         self.current_telemetry = sample
         v_accent = Theme.GOOD if 114 <= sample.vrms <= 140 else Theme.WARN
         i_accent = Theme.GOOD if sample.irms <= NOMINAL_CURRENT_ARMS else Theme.WARN
-        pf_mag = abs(sample.pf)
-        pf_accent = Theme.GOOD if pf_mag >= 0.90 else Theme.WARN if pf_mag >= 0.75 else Theme.BAD
+        pf_accent = Theme.GOOD if sample.pf >= 0.90 else Theme.WARN if sample.pf >= 0.75 else Theme.BAD
         q_accent = Theme.WARN if sample.reactive_power > 1.0 else Theme.ACCENT if sample.reactive_power < -1.0 else Theme.SUBTLE
         q_subtitle = "Inductive (positive)" if sample.reactive_power > 1.0 else "Capacitive (negative)" if sample.reactive_power < -1.0 else "Nearly resistive"
 
@@ -929,7 +967,7 @@ class DashboardFrame(tk.Frame):
         self.card_f.set(f"{sample.frequency:.2f}", "Hz", f"Δ vs 60 Hz: {sample.frequency - NOMINAL_FREQ_HZ:+.2f} Hz")
 
         if sample.energy_wh >= 1000.0:
-            self.card_e.set(f"{sample.energy_wh / 1000.0:.2f}", "kWh", "Accumulated")
+            self.card_e.set(f"{sample.energy_wh / 1000.0:.4f}", "kWh", "Accumulated")
         else:
             self.card_e.set(f"{sample.energy_wh:.2f}", "Wh", "Accumulated")
 
@@ -1359,6 +1397,7 @@ class WaveformAnalysisPanel(tk.Frame):
             self.fs_metric.set(f"{SAMPLE_RATE_HZ} Hz")
             self.phase_metric.set("--")
             self.shift_metric.set("--")
+            self.capture_info_label.configure(text="Shown capture: --")
 
     def _center_text(self, canvas: tk.Canvas, text: str) -> None:
         w = max(260, canvas.winfo_width())
@@ -1391,6 +1430,7 @@ class WaveformAnalysisPanel(tk.Frame):
         self.phase_metric.set(f"{packet.phase_angle_deg:+.1f} °")
         self.shift_metric.set(f"{1000.0 * packet.time_shift_s:+.2f} ms")
         self.phase_note_label.configure(text="ⓘ " + phase_note_from_angle(packet.phase_angle_deg), fg=Theme.ACCENT)
+        self.capture_info_label.configure(text=f"Shown capture: {display_timestamp_seconds(packet.timestamp)}")
         self.draw_waveform()
         self.draw_fft()
 
@@ -1878,6 +1918,7 @@ class SmartPlugApp:
         except tk.TclError:
             # Some non-Windows Tk builds do not support the zoomed state.
             pass
+
 
         self.incoming_queue: "queue.Queue[Tuple[str, str]]" = queue.Queue()
         self.router = MessageRouter(self)

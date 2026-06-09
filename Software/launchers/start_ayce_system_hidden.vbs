@@ -1,20 +1,15 @@
 Option Explicit
 
-Dim fso, shell, launcherDir, psScript, psExe, cmd
-Set fso = CreateObject("Scripting.FileSystemObject")
+Dim shell, fso, scriptDir, psScript, command
 Set shell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
 
-launcherDir = fso.GetParentFolderName(WScript.ScriptFullName)
-psScript = fso.BuildPath(launcherDir, "Start-AyceSystem.ps1")
-psExe = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\WindowsPowerShell\v1.0\powershell.exe"
+scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
+psScript = fso.BuildPath(scriptDir, "Start-AyceSystem.ps1")
 
-If Not fso.FileExists(psScript) Then
-    MsgBox "Launcher script not found:" & vbCrLf & psScript, vbCritical, "AYCE Smart Plug Launcher"
-    WScript.Quit 1
-End If
+shell.CurrentDirectory = scriptDir
+command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " & Chr(34) & psScript & Chr(34)
 
-cmd = """" & psExe & """ -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & psScript & """"
-
-' Window style 0 keeps the launcher hidden. The broker console, when launched by
-' Start-AyceSystem.ps1, remains visible because it is started as a separate process.
-shell.Run cmd, 0, False
+' Window style 0 keeps the supervisor hidden. The supervisor will still open
+' the AYCE MQTT Broker console intentionally and will start the GUI with pythonw.
+shell.Run command, 0, False
