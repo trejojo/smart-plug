@@ -10,6 +10,32 @@
 
 static const char *TAG = "module_mqtt";
 
+/* Standardized MQTT topic contract */
+#define TOPIC_TELEMETRY_STATUS       "smartplug/telemetry/status"
+#define TOPIC_TELEMETRY_TEMPERATURE  "smartplug/telemetry/temperature"
+#define TOPIC_TELEMETRY_ENERGY       "smartplug/telemetry/energy"
+#define TOPIC_EVENTS_PROTECTION      "smartplug/events/protection"
+#define TOPIC_STATE_RELAY            "smartplug/state/relay"
+#define TOPIC_STATE_LED              "smartplug/state/led"
+#define TOPIC_COMMAND_ACK            "smartplug/commands/ack"
+#define TOPIC_COMMAND_RELAY          "smartplug/commands/relay"
+#define TOPIC_COMMAND_CONFIG         "smartplug/commands/config"
+#define TOPIC_WAVEFORM_REQUEST       "smartplug/waveform/request"
+#define TOPIC_WAVEFORM_DATA          "smartplug/waveform/data"
+
+/* Legacy development topics accepted during transition only. */
+#define LEGACY_TOPIC_STATUS          "smartplug/status"
+#define LEGACY_TOPIC_EVENTS          "smartplug/events"
+#define LEGACY_TOPIC_RELAY           "smartplug/relay"
+#define LEGACY_TOPIC_LED             "smartplug/led"
+#define LEGACY_TOPIC_TEMPERATURE     "smartplug/temperature"
+#define LEGACY_TOPIC_ENERGY          "smartplug/energy"
+#define LEGACY_TOPIC_RELAY_CMD       "smartplug/cmd"
+#define LEGACY_TOPIC_AYCE_CMD        "ayce/cmd"
+#define LEGACY_TOPIC_AYCE_STATUS     "ayce/status"
+#define LEGACY_TOPIC_WAVEFORM_CHUNK  "smartplug/waveform/chunk"
+#define LEGACY_TOPIC_WAVEFORM_CMD    "smartplug/waveform/cmd"
+
 /* MQTT client handle */
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 static bool mqtt_connected = false;
@@ -28,6 +54,25 @@ static bool mqtt_topic_matches(const esp_mqtt_event_handle_t event, const char *
 	return event->topic_len == (int)topic_len && strncmp(event->topic, topic, topic_len) == 0;
 }
 
+
+static bool mqtt_payload_equals(const esp_mqtt_event_handle_t event, const char *expected)
+{
+	if (event == NULL || event->data == NULL || expected == NULL) {
+		return false;
+	}
+
+	size_t expected_len = strlen(expected);
+	return event->data_len == (int)expected_len && strncmp(event->data, expected, expected_len) == 0;
+}
+
+static bool command_string_is_waveform_request(const char *command)
+{
+	return command != NULL &&
+	       (strcmp(command, "REQUEST_WAVEFORM") == 0 ||
+	        strcmp(command, "send_waveform") == 0 ||
+	        strcmp(command, "capture_wave") == 0);
+}
+
 static void publish_safety_limits_ack(float max_vrms, float max_iarms, bool accepted, const char *reason)
 {
 	char ack_payload[256];
@@ -44,7 +89,7 @@ static void publish_safety_limits_ack(float max_vrms, float max_iarms, bool acce
 	         max_iarms,
 	         reason != NULL ? reason : "unknown");
 
-	int ack_msg_id = esp_mqtt_client_publish(mqtt_client, "aice/status", ack_payload, 0, 1, 0);
+	int ack_msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_COMMAND_ACK, ack_payload, 0, 1, 0);
 	if (ack_msg_id == -1) {
 		ESP_LOGE(TAG, "Failed to publish safety-limit acknowledgment");
 	} else {
@@ -64,7 +109,7 @@ static void publish_waveform_request_ack(bool accepted, const char *reason)
 	         accepted ? "true" : "false",
 	         reason != NULL ? reason : "unknown");
 
-	int ack_msg_id = esp_mqtt_client_publish(mqtt_client, "aice/status", ack_payload, 0, 1, 0);
+	int ack_msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_COMMAND_ACK, ack_payload, 0, 1, 0);
 	if (ack_msg_id == -1) {
 		ESP_LOGE(TAG, "Failed to publish waveform-request acknowledgment");
 	} else {
@@ -86,7 +131,7 @@ static void publish_relay_command_ack(const char *action, bool accepted, const c
 	         accepted ? "true" : "false",
 	         reason != NULL ? reason : "unknown");
 
-	int ack_msg_id = esp_mqtt_client_publish(mqtt_client, "aice/status", ack_payload, 0, 1, 0);
+	int ack_msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_COMMAND_ACK, ack_payload, 0, 1, 0);
 	if (ack_msg_id == -1) {
 		ESP_LOGE(TAG, "Failed to publish relay-command acknowledgment");
 	} else {
@@ -136,7 +181,7 @@ esp_err_t module_mqtt_publish_critical_protection(const char *cause,
 		return ESP_ERR_NO_MEM;
 	}
 
-	int msg_id = esp_mqtt_client_publish(mqtt_client, "smartplug/events", payload, 0, 1, 0);
+	int msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_EVENTS_PROTECTION, payload, 0, 1, 0);
 
 	cJSON_free(payload);
 	cJSON_Delete(root);
@@ -176,8 +221,10 @@ static void handle_safety_limits_command(const esp_mqtt_event_handle_t event)
 	}
 
 	cJSON *action_item = cJSON_GetObjectItemCaseSensitive(root, "action");
-	if (cJSON_IsString(action_item) && action_item->valuestring != NULL &&
-	    (strcmp(action_item->valuestring, "send_waveform") == 0 || strcmp(action_item->valuestring, "capture_wave") == 0)) {
+	cJSON *command_item = cJSON_GetObjectItemCaseSensitive(root, "command");
+	const char *action_value = cJSON_IsString(action_item) ? action_item->valuestring : NULL;
+	const char *command_value = cJSON_IsString(command_item) ? command_item->valuestring : NULL;
+	if (command_string_is_waveform_request(action_value) || command_string_is_waveform_request(command_value)) {
 		esp_err_t waveform_ret = module_ade7953_start_snapshot_capture();
 		if (waveform_ret == ESP_OK) {
 			ESP_LOGI(TAG, "Waveform request received from GUI: starting 512-sample snapshot");
@@ -233,6 +280,91 @@ static void handle_safety_limits_command(const esp_mqtt_event_handle_t event)
 	cJSON_Delete(root);
 }
 
+
+static void handle_relay_command(const esp_mqtt_event_handle_t event)
+{
+	if (event == NULL || event->data == NULL || event->data_len <= 0) {
+		ESP_LOGW(TAG, "Ignoring empty relay command");
+		publish_relay_command_ack("unknown", false, "empty payload");
+		return;
+	}
+
+	if (event->data_len >= 256) {
+		ESP_LOGW(TAG, "Relay command too large: %d bytes", event->data_len);
+		publish_relay_command_ack("unknown", false, "payload too large");
+		return;
+	}
+
+	char payload[256];
+	memcpy(payload, event->data, (size_t)event->data_len);
+	payload[event->data_len] = '\0';
+
+	bool relay_set = false;
+	bool relay_on = false;
+	const char *action = "unknown";
+
+	cJSON *root = cJSON_Parse(payload);
+	if (root != NULL) {
+		cJSON *command_item = cJSON_GetObjectItemCaseSensitive(root, "command");
+		cJSON *relay_item = cJSON_GetObjectItemCaseSensitive(root, "relay");
+
+		if (cJSON_IsString(command_item) && command_item->valuestring != NULL) {
+			action = command_item->valuestring;
+			if (strcmp(command_item->valuestring, "RELAY_ON") == 0 || strcmp(command_item->valuestring, "ON") == 0) {
+				relay_on = true;
+				relay_set = true;
+			} else if (strcmp(command_item->valuestring, "RELAY_OFF") == 0 || strcmp(command_item->valuestring, "OFF") == 0) {
+				relay_on = false;
+				relay_set = true;
+			}
+		}
+
+		if (!relay_set && cJSON_IsBool(relay_item)) {
+			relay_on = cJSON_IsTrue(relay_item);
+			relay_set = true;
+			action = relay_on ? "RELAY_ON" : "RELAY_OFF";
+		}
+	} else {
+		if (mqtt_payload_equals(event, "RELAY_ON")) {
+			relay_on = true;
+			relay_set = true;
+			action = "RELAY_ON";
+		} else if (mqtt_payload_equals(event, "RELAY_OFF")) {
+			relay_on = false;
+			relay_set = true;
+			action = "RELAY_OFF";
+		}
+	}
+
+	if (!relay_set) {
+		ESP_LOGW(TAG, "Invalid relay command payload: %s", payload);
+		publish_relay_command_ack(action, false, "invalid relay command");
+		if (root != NULL) {
+			cJSON_Delete(root);
+		}
+		return;
+	}
+	ESP_LOGW(TAG, "Relay command received: %s", action);
+	bool applied_successfully = false;
+	
+	if (s_relay_command_handler != NULL) {
+        esp_err_t err = s_relay_command_handler(action, s_relay_command_handler_user_data);
+        if (err == ESP_OK) {
+            applied_successfully = true;
+        } else {
+            ESP_LOGE(TAG, "Relay handler failed with error code: %d", err);
+        }
+    } else {
+        ESP_LOGW(TAG, "Relay command handler is not registered!");
+    }
+
+	publish_relay_command_ack(action, applied_successfully, applied_successfully ? "applied" : "hardware error");
+
+	if (root != NULL) {
+		cJSON_Delete(root);
+	}
+}
+
 esp_err_t module_mqtt_set_safety_limits_handler(module_mqtt_safety_limits_handler_t handler, void *user_data)
 {
 	s_safety_limits_handler = handler;
@@ -258,9 +390,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 		case MQTT_EVENT_CONNECTED:
 			ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
 			mqtt_connected = true;
-			/* Subscribe to receive GUI commands and safety-limit updates */
-			esp_mqtt_client_subscribe(mqtt_client, "smartplug/cmd", 0);
-			esp_mqtt_client_subscribe(mqtt_client, "aice/cmd", 0);
+			/* Subscribe to receive GUI commands, safety config and waveform requests */
+			esp_mqtt_client_subscribe(mqtt_client, TOPIC_COMMAND_RELAY, 0);
+			esp_mqtt_client_subscribe(mqtt_client, TOPIC_COMMAND_CONFIG, 0);
+			esp_mqtt_client_subscribe(mqtt_client, TOPIC_WAVEFORM_REQUEST, 0);
+
+			/* Transition aliases for older PC tools. */
+			esp_mqtt_client_subscribe(mqtt_client, LEGACY_TOPIC_RELAY_CMD, 0);
+			esp_mqtt_client_subscribe(mqtt_client, LEGACY_TOPIC_AYCE_CMD, 0);
+			esp_mqtt_client_subscribe(mqtt_client, LEGACY_TOPIC_WAVEFORM_CMD, 0);
 			break;
 
 		case MQTT_EVENT_DISCONNECTED:
@@ -286,16 +424,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 			ESP_LOGI(TAG, "DATA=%.*s", event->data_len, event->data);
 			
 			/* Process incoming commands from GUI */
-			if (mqtt_topic_matches(event, "aice/cmd")) {
+			if (mqtt_topic_matches(event, TOPIC_COMMAND_CONFIG) || mqtt_topic_matches(event, LEGACY_TOPIC_AYCE_CMD)) {
 				handle_safety_limits_command(event);
-			} else if (mqtt_topic_matches(event, "smartplug/cmd")) {
-				if (strncmp(event->data, "RELAY_ON", event->data_len) == 0) {
-					ESP_LOGW(TAG, "Command received: Turning relay ON");
-					module_relay_set(true);
-				} else if (strncmp(event->data, "RELAY_OFF", event->data_len) == 0) {
-					ESP_LOGW(TAG, "Command received: Turning relay OFF");
-					module_relay_set(false);
-				}
+			} else if (mqtt_topic_matches(event, TOPIC_WAVEFORM_REQUEST) || mqtt_topic_matches(event, LEGACY_TOPIC_WAVEFORM_CMD)) {
+				handle_safety_limits_command(event);
+			} else if (mqtt_topic_matches(event, TOPIC_COMMAND_RELAY) || mqtt_topic_matches(event, LEGACY_TOPIC_RELAY_CMD)) {
+				handle_relay_command(event);
 			}
 			break;
 
@@ -448,7 +582,7 @@ esp_err_t module_mqtt_publish_relay(bool relay_on)
 		return ESP_ERR_NO_MEM;
 	}
 
-	int msg_id = esp_mqtt_client_publish(mqtt_client, "smartplug/relay", payload, 0, 1, 0);
+	int msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_STATE_RELAY, payload, 0, 1, 0);
 
 	cJSON_free(payload);
 	cJSON_Delete(root);
@@ -474,7 +608,7 @@ esp_err_t module_mqtt_publish_led(uint8_t red, uint8_t green, uint8_t blue)
 	char payload[64];
 	snprintf(payload, sizeof(payload), "{\"r\":%d,\"g\":%d,\"b\":%d}", red, green, blue);
 
-	int msg_id = esp_mqtt_client_publish(mqtt_client, "smartplug/led", payload, 0, 1, 0);
+	int msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_STATE_LED, payload, 0, 1, 0);
 	if (msg_id == -1) {
 		ESP_LOGE(TAG, "Failed to publish LED status");
 		return ESP_FAIL;
@@ -507,7 +641,7 @@ esp_err_t module_mqtt_publish_temperature(float temp_celsius)
 		return ESP_ERR_NO_MEM;
 	}
 
-	int msg_id = esp_mqtt_client_publish(mqtt_client, "smartplug/temperature", payload, 0, 1, 0);
+	int msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_TELEMETRY_TEMPERATURE, payload, 0, 1, 0);
 
 	cJSON_free(payload);
 	cJSON_Delete(root);
@@ -522,45 +656,6 @@ esp_err_t module_mqtt_publish_temperature(float temp_celsius)
 }
 
 /**
- * @brief Publish energy readings
- */
-esp_err_t module_mqtt_publish_energy(float voltage_v, float current_a, float power_w, uint32_t energy_wh)
-{
-	if (!module_mqtt_is_connected()) {
-		return ESP_ERR_INVALID_STATE;
-	}
-
-	cJSON *root = cJSON_CreateObject();
-	if (root == NULL) {
-		return ESP_ERR_NO_MEM;
-	}
-
-	cJSON_AddNumberToObject(root, "voltage", voltage_v);
-	cJSON_AddNumberToObject(root, "current", current_a);
-	cJSON_AddNumberToObject(root, "power", power_w);
-	cJSON_AddNumberToObject(root, "energy", energy_wh);
-
-	char *payload = cJSON_PrintUnformatted(root);
-	if (payload == NULL) {
-		cJSON_Delete(root);
-		return ESP_ERR_NO_MEM;
-	}
-
-	int msg_id = esp_mqtt_client_publish(mqtt_client, "smartplug/energy", payload, 0, 1, 0);
-
-	cJSON_free(payload);
-	cJSON_Delete(root);
-
-	if (msg_id == -1) {
-		ESP_LOGE(TAG, "Failed to publish energy readings");
-		return ESP_FAIL;
-	}
-
-	ESP_LOGI(TAG, "Published energy readings (msg_id: %d)", msg_id);
-	return ESP_OK;
-}
-
-/**
  * @brief Publish combined status
  */
 esp_err_t module_mqtt_publish_status(float temperature_c,
@@ -569,50 +664,54 @@ esp_err_t module_mqtt_publish_status(float temperature_c,
                                      float pf,
                                      float active_power,
                                      float reactive_power,
+                                     float apparent_power, 
                                      float frequency,
                                      bool no_load,
-                                     uint32_t energy_wh,
+                                     float energy_wh,
                                      bool relay_state)
 {
-	if (!module_mqtt_is_connected()) {
-		return ESP_ERR_INVALID_STATE;
-	}
+    if (!module_mqtt_is_connected()) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
-	char payload[256];
-	snprintf(payload, sizeof(payload),
-		     "{"
-		     "\"vrms\":%.2f,"
-		     "\"irms\":%.3f,"
-		     "\"pf\":%.3f,"
-		     "\"active_power\":%.2f,"
-		     "\"reactive_power\":%.2f,"
-		     "\"frequency\":%.2f,"
-		     "\"no_load\":%s,"
-		     "\"energy_wh\":%" PRIu32 ","
-		     "\"relay\":%s,"
-		     "\"tmp_c\":%.2f"
-		     "}",
-		     vrms,
-		     irms,
-		     pf,
-		     active_power,
-		     reactive_power,
-		     frequency,
-		     no_load ? "true" : "false",
-		     energy_wh,
-		     relay_state ? "true" : "false",
-		     temperature_c);
+    char payload[256];
+    
+    // Updated to exactly match the requested JSON schema order and fields
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"vrms\":%.2f,"
+             "\"irms\":%.3f,"
+             "\"active_power\":%.2f,"
+             "\"reactive_power\":%.2f,"
+             "\"apparent_power\":%.2f,"
+             "\"pf\":%.3f,"
+             "\"frequency\":%.2f,"
+             "\"energy_wh\":%.2f,"
+             "\"tmp_c\":%.2f,"
+             "\"relay\":%s,"
+             "\"no_load\":%s"
+             "}",
+             vrms,
+             irms,
+             active_power,
+             reactive_power,
+             apparent_power, // <-- NEW VARIABLE
+             pf,
+             frequency,
+             energy_wh,
+             temperature_c,
+             relay_state ? "true" : "false",
+             no_load ? "true" : "false");
 
-	ESP_LOGI(TAG, "Publishing status: %s", payload);
-	int msg_id = esp_mqtt_client_publish(mqtt_client, "smartplug/status", payload, 0, 1, 0);
+    ESP_LOGI(TAG, "Publishing status: %s", payload);
+    int msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_TELEMETRY_STATUS, payload, 0, 1, 0);
 
-	if (msg_id == -1) {
-		ESP_LOGE(TAG, "Failed to publish status");
-		return ESP_FAIL;
-	}
+    if (msg_id == -1) {
+        ESP_LOGE(TAG, "Failed to publish status");
+        return ESP_FAIL;
+    }
 
-	ESP_LOGI(TAG, "Published status (msg_id: %d)", msg_id);
-	return ESP_OK;
+    return ESP_OK;
 }
 
 /**
@@ -628,7 +727,7 @@ esp_err_t module_mqtt_publish_waveform_chunk(const char *payload)
 		return ESP_ERR_INVALID_ARG;
 	}
 
-	int msg_id = esp_mqtt_client_publish(mqtt_client, "smartplug/waveform/chunk", payload, 0, 1, 0);
+	int msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_WAVEFORM_DATA, payload, 0, 1, 0);
 	if (msg_id == -1) {
 		ESP_LOGE(TAG, "Failed to publish waveform chunk");
 		return ESP_FAIL;
@@ -654,6 +753,8 @@ esp_err_t module_mqtt_disconnect(void)
 	mqtt_connected = false;
 	s_safety_limits_handler = NULL;
 	s_safety_limits_handler_user_data = NULL;
+	s_relay_command_handler = NULL;
+	s_relay_command_handler_user_data = NULL;
 
 	return ESP_OK;
 }

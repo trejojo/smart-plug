@@ -1,191 +1,247 @@
-# PC Software & Provisioning Setup
+# AYCE Smart Plug PC Software
 
-This guide explains how to set up your local PC environment to communicate with the SmartPlug via Bluetooth Low Energy (BLE) and handle telemetry data.
+This folder contains the PC-side software for the AYCE Smart Plug project. It includes the live GUI, the reusable MQTT client, the BLE provisioning helper, shared assets, and a launcher system that starts the local Mosquitto broker and the GUI together.
 
----
+## Folder structure
 
-## 1. Local Environment Setup
-
-Before running the scripts, you must create an isolated Python environment to avoid library conflicts.
-
-### A. Create the Virtual Environment
-
-Open your terminal in the `Software` directory and run:
-
-```powershell
-python -m venv .venv_pc
+```text
+Software/
+├─ README.md
+├─ requirements.txt
+├─ assets/
+│  ├─ ayce_logo.ico
+│  └─ ayce_logo.png
+├─ launchers/
+│  ├─ README.md
+│  ├─ create_desktop_shortcut.bat
+│  ├─ create_desktop_shortcut.ps1
+│  ├─ start_ayce_system_hidden.vbs
+│  └─ Start-AyceSystem.ps1
+├─ telemetry/
+│  ├─ README.md
+│  ├─ smartplug_gui.py
+│  ├─ mqtt_client.py
+│  └─ mosquitto.conf
+└─ provisioning/
+   ├─ README.md
+   └─ provisioner.py
 ```
 
-### B. Activate the Environment
+## What each folder does
 
-#### PowerShell
+- **`assets/`**: shared AYCE icon files used by the desktop shortcut and the GUI window/title bar.
+- **`launchers/`**: startup and desktop-shortcut helpers. This is the official entry point for normal use.
+- **`telemetry/`**: the GUI, MQTT logic, waveform/FFT processing, true apparent power display using `apparent_power`, and local Mosquitto configuration.
+- **`provisioning/`**: BLE helper used to send Wi-Fi credentials to the AYCE ESP32.
 
-```powershell
-.\.venv_pc\Scripts\Activate.ps1
-```
+## Before using the system
 
-#### Command Prompt (CMD)
+Complete the following PC setup steps first.
+
+### 1) Install Python
+
+Install a recent Windows version of Python 3.
+
+### 2) Install Mosquitto MQTT Broker
+
+Install **Mosquitto** on Windows. The launcher looks for `mosquitto.exe` first in `PATH`, then in the common default locations:
+
+- `C:\Program Files\Mosquitto\mosquitto.exe`
+- `C:\Program Files (x86)\Mosquitto\mosquitto.exe`
+
+### 3) Install Python dependencies
+
+From the `Software` folder run either one of the following approaches.
+
+#### Option A: without a virtual environment
 
 ```cmd
-.\.venv_pc\Scripts\activate.bat
-```
-
-### C. Install Dependencies
-
-Once the environment is active (you should see `(.venv_pc)` in your terminal), install the required libraries:
-
-```powershell
 pip install -r requirements.txt
 ```
 
----
+#### Option B: with a virtual environment
 
-## 2. VS Code Configuration
-
-To ensure VS Code uses the correct libraries and provides proper IntelliSense, follow these steps:
-
-### How to Set `.venv_pc` as Active in VS Code
-
-1. Open the Command Palette with:
-
-   ```text
-   Ctrl + Shift + P
-   ```
-
-2. Run:
-
-   ```text
-   Python: Select Interpreter
-   ```
-
-3. Select the interpreter that points to your local virtual environment:
-
-   ```text
-   .venv_pc\Scripts\python.exe
-   ```
-
-4. Reload the VS Code window by opening the Command Palette again and running:
-
-   ```text
-   Developer: Reload Window
-   ```
-
-> After reloading, verify that the bottom-right status bar in VS Code shows `(.venv_pc)`.
-
----
-
-## 3. Usage: Provisioning the Device
-
-### Prerequisites
-
-- Ensure your PC Bluetooth is turned ON
-- Enable your Hotspot (set to 2.4 GHz band)
-- Ensure the ESP32 is powered and in BLE Advertising mode
-
-### Run Provisioning Script
-
-```powershell
-python provisioning/provisioner.py
+```cmd
+python -m venv .venv_pc
+.\.venv_pc\Scripts\activate
+pip install -r requirements.txt
 ```
 
-### At this point "Provisioner.py" should...
+You do **not** need a virtual environment to use this project. The launcher supports both modes:
 
-1. Scan for a nearby SmartPlug device (15-second timeout)
-2. Connect via BLE
-3. Verify the provisioning service UUID
-4. Send Wi-Fi credentials as a JSON payload
+- If `.venv_pc` or `.venv` exists, it uses that Python first.
+- Otherwise, it uses the system Python installation.
 
-### Troubleshooting
+### 4) Force the Wi-Fi adapter to prefer 2.4 GHz
 
-- **SmartPlug not found:** Check if the ESP32 is powered and advertising BLE.
+Because the ESP32 connects through **2.4 GHz Wi-Fi**, configure the PC wireless adapter accordingly.
 
-- **Connection timeout:** The device may have disconnected. Try again.
+In Windows:
 
-- **Service UUID not found:** Firmware and client UUID definitions may be mismatched.
+1. Open **Device Manager**.
+2. Open **Network adapters**.
+3. Right-click your Wi-Fi adapter and open **Properties**.
+4. Open the **Advanced** tab.
+5. Set **Preferred Band** to **2.4 GHz**.
 
----
+### 5) Create a Windows mobile hotspot in 2.4 GHz mode
 
-## 4. MQTT Broker & Telemetry Setup
+The AYCE device will connect to the hotspot whose credentials you send over BLE.
 
-After the ESP32 is provisioned and connected to Wi-Fi, it can send telemetry data via MQTT to your PC.
+In Windows:
 
-### A. Install Mosquitto MQTT Broker (Windows)
+1. Open **Settings**.
+2. Go to **Network & Internet**.
+3. Open **Mobile hotspot**.
+4. Enable hotspot sharing over **Wi-Fi**.
+5. Set the hotspot **Band** to **2.4 GHz**.
+6. Set the hotspot **Name** and **Password** to the exact credentials you want to send to AYCE over BLE.
 
-1. Download Mosquitto from: https://mosquitto.org/download/
-2. Run the installer (choose default options)
-3. During installation, Mosquitto will be registered as a Windows Service
+> Important: the hotspot SSID and password configured on the PC must match the credentials sent to the AYCE device during BLE provisioning.
 
-### B. Configure Mosquitto
+## Normal startup workflow
 
-1. Locate the configuration file:
-   - Default path: `C:\Program Files\mosquitto\mosquitto.conf`
+For normal use:
 
-2. Replace its contents with the configuration from `mosquitto.conf` in this repository, or manually add:
+1. Run `launchers/create_desktop_shortcut.bat` once.
+2. Use the generated **AYCE Smart Plug** desktop shortcut from then on.
 
-   ```conf
-   listener 1883
-   allow_anonymous true
-   ```
+Each time you open that desktop shortcut:
 
-3. Save the file
+- a **visible Mosquitto broker console** opens,
+- the **GUI starts without a Python console**,
+- the hidden PowerShell supervisor monitors both processes.
 
-### C. Start the MQTT Broker
+The shortcut uses `wscript.exe` and `launchers/start_ayce_system_hidden.vbs` to start the supervisor without leaving an extra empty console open.
 
-**Option 1: Using Windows Services (Recommended)**
-- Open `Services.msc`
-- Find "Mosquitto Broker"
-- Click "Start" (or set to auto-start)
+### Coupled shutdown behavior
 
-**Option 2: Command Line**
-```powershell
-mosquitto -c "C:\Program Files\mosquitto\mosquitto.conf"
-```
+The launcher supervises only the processes it started.
 
-**Verify it's running:**
-```powershell
-netstat -an | findstr 1883
-```
-You should see a line with `LISTENING` on port 1883.
+- If you close the **GUI**, the launcher closes the Mosquitto broker console and its process tree.
+- If you close the **broker console**, the launcher closes the GUI process tree.
 
-### D. Run the MQTT Telemetry Client
+The cleanup uses Windows `taskkill /PID <pid> /T /F` so child processes are also closed.
 
-Once the broker is running and the ESP32 is connected to Wi-Fi, start the telemetry listener:
+## BLE provisioning flow
 
-```powershell
-python telemetry/mqtt_client.py
-```
+The GUI starts in the provisioning / reconnection phase until status telemetry is received.
 
-### What the Client Does
+Typical flow:
 
-- Connects to the local MQTT broker (127.0.0.1:1883)
-- Subscribes to all SmartPlug topics (smartplug/*)
-- Displays received messages with timestamps
-- Pretty-prints JSON payloads for readability
+1. Open the system using the desktop shortcut.
+2. Make sure the Windows mobile hotspot is active in **2.4 GHz** mode.
+3. In the GUI provisioning screen, enter:
+   - Wi-Fi SSID
+   - Wi-Fi password
+   - broker IP / hostname
+   - broker port
+   - AYCE BLE MAC address
+4. Send credentials over BLE.
+5. The ESP32 connects to the hotspot and then to the local MQTT broker.
+6. Once status telemetry starts arriving, the GUI switches to the main dashboard.
 
-### Troubleshooting
+## Waveform capture contract
 
-- **Connection refused:** Broker is not running. Start Mosquitto first.
-- **No messages received:** Check that the ESP32 is connected to Wi-Fi (check IP in ESP32 logs)
-- **Port 1883 in use:** Another application is using the port. Change the port in mosquitto.conf and mqtt_client.py
-
----
-
-## Configuration Reference
-
-### Service UUID (Provisioning)
+The GUI and console tool use the fixed capture request:
 
 ```text
-f0debc9a-7856-3412-7856-341278563412
+512 samples @ 2400 Hz
 ```
 
-### Characteristic UUID (JSON Credentials)
+This corresponds to approximately:
 
 ```text
-f1debc9a-7856-3412-7856-341278563412
+213.33 ms, or about 12.80 cycles at 60 Hz
 ```
 
-### Device Name
+## Power triangle behavior
+
+The power triangle shape is still animated smoothly for a better visual transition. The numeric labels for **P**, **Q**, and **S** update immediately from the latest telemetry so they stay readable even when the measurements change quickly.
+
+## GUI icon behavior
+
+The GUI loads the shared AYCE icon from `Software/assets/` for the Tkinter window/title bar. The Windows taskbar can still show the Python icon because the GUI runs through `pythonw.exe`; this version intentionally avoids extra Win32/AppUserModelID taskbar-forcing code.
+
+## About `__pycache__`
+
+`__pycache__` folders are generated by Python to store compiled bytecode files (`.pyc`). They are not source files and are not required for distribution.
+
+This package does not include `__pycache__` folders. The launcher sets:
 
 ```text
-SmartPlug
+PYTHONDONTWRITEBYTECODE=1
 ```
+
+and starts the GUI with Python's `-B` option to avoid creating project `__pycache__` folders during normal launcher-based use.
+
+If you run scripts manually without `-B`, Python may create `__pycache__` again. It is safe to delete those folders.
+
+## Recommended first test
+
+1. Install Mosquitto.
+2. Install Python dependencies.
+3. Configure the Wi-Fi adapter preferred band to **2.4 GHz**.
+4. Configure and enable the Windows mobile hotspot in **2.4 GHz** mode.
+5. Run `launchers/create_desktop_shortcut.bat` once.
+6. Open the desktop shortcut.
+7. Use BLE provisioning if needed.
+8. Wait for `smartplug/telemetry/status` telemetry.
+9. Test relay control, safety limits, waveform capture, and shutdown behavior.
+
+## Quick troubleshooting
+
+### The GUI does not start
+
+Check that:
+
+- Python is installed.
+- `paho-mqtt` and `bleak` are installed.
+- `telemetry/smartplug_gui.py` exists.
+
+### The broker console does not start
+
+Check that:
+
+- Mosquitto is installed.
+- `mosquitto.exe` is in `PATH` or in the default install folder.
+- `telemetry/mosquitto.conf` exists.
+
+### AYCE does not connect
+
+Check that:
+
+- the PC hotspot is enabled,
+- the hotspot is set to **2.4 GHz**,
+- the SSID and password sent over BLE exactly match the hotspot,
+- the broker IP/host entered in the GUI matches the PC running Mosquitto.
+
+### A teammate uses a virtual environment and I do not
+
+That is supported. The launcher automatically prefers `.venv_pc` or `.venv` when they exist, and otherwise falls back to the system Python installation.
+
+## Additional documentation
+
+- `launchers/README.md`
+- `telemetry/README.md`
+- `provisioning/README.md`
+
+## Mosquitto service starts automatically
+
+If Windows starts Mosquitto automatically after reboot, port `1883` may already be occupied before the AYCE launcher starts. The launcher expects to control the broker instance it opens. The recommended setup is to leave the Mosquitto Windows service in **Manual** startup mode.
+
+Check the port owner:
+
+```cmd
+netstat -ano | findstr :1883
+tasklist /FI "PID eq <PID>"
+```
+
+Set Mosquitto to manual startup from an administrator CMD:
+
+```cmd
+sc stop mosquitto
+sc config mosquitto start= demand
+```
+
+You can also use `services.msc`, open the Mosquitto service properties, stop it, and set **Startup type** to **Manual**.

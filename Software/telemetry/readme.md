@@ -1,235 +1,219 @@
-# SmartPlug Telemetry and GUI Contract
+# Telemetry GUI and MQTT Layer
 
-This document defines the PC-side telemetry stack for SmartPlug. It is intended to guide the follow-up GUI work that sits on top of the MQTT client.
+This folder contains the AYCE live dashboard, the reusable MQTT client, and the local Mosquitto broker configuration.
 
-The PC application should be organized as:
+## Files
 
-1. MQTT client layer that subscribes to telemetry and alert topics.
-2. GUI layer that renders live values, alerts, and history.
-3. Optional command layer that sends control messages back to the ESP32.
+| File | Purpose |
+|---|---|
+| `smartplug_gui.py` | Main AYCE GUI. Handles provisioning phase, dashboard, waveform capture, FFT, THD, CSV export, user commands, and the GUI window icon. |
+| `mqtt_client.py` | Reusable MQTT client and optional console tool for AYCE topics. |
+| `mosquitto.conf` | Local Mosquitto configuration used by the launcher. |
 
-## System Goal
+The shared AYCE icon used by the GUI window/title bar is stored in:
 
-The PC should be able to:
+```text
+Software/assets/ayce_logo.ico
+Software/assets/ayce_logo.png
+```
 
-- Receive continuous ADE7953 telemetry from the ESP32.
-- Receive high-priority protection alerts.
-- Send control commands back to the ESP32.
-- Store and display historical data in the GUI.
+## Functional overview
 
-## Broker Assumptions
+### `smartplug_gui.py`
 
-The MQTT broker runs on the PC and accepts anonymous connections.
+Main responsibilities:
 
-Recommended Mosquitto settings:
+- shows the provisioning / reconnection phase before telemetry is received,
+- connects to the MQTT broker,
+- switches to the main dashboard when status telemetry arrives,
+- displays electrical metrics and temperature,
+- sends relay and safety-limit commands,
+- requests and plots waveform captures,
+- computes FFT, THD, phase angle, and time shift locally,
+- exports CSV snapshots and tables,
+- applies the AYCE icon to the GUI window/title bar.
+
+### `mqtt_client.py`
+
+Main responsibilities:
+
+- centralizes MQTT topic names,
+- parses incoming JSON payloads,
+- publishes relay/config/waveform commands,
+- offers an optional console-oriented diagnostic interface.
+
+## MQTT topic contract
+
+### ESP32 -> PC
+
+| Topic | Purpose | Payload |
+|---|---|---|
+| `smartplug/telemetry/status` | Main dashboard telemetry / device heartbeat | JSON |
+| `smartplug/telemetry/temperature` | Temperature-only update | JSON |
+| `smartplug/telemetry/energy` | Energy/basic electrical update | JSON |
+| `smartplug/events/protection` | ADE7953 protection event | JSON |
+| `smartplug/state/relay` | Relay state update | JSON |
+| `smartplug/state/led` | RGB LED state update | JSON |
+| `smartplug/commands/ack` | ACK for GUI commands | JSON |
+| `smartplug/waveform/data` | One waveform capture packet | JSON |
+
+### PC -> ESP32
+
+| Topic | Purpose | Payload |
+|---|---|---|
+| `smartplug/commands/relay` | Relay ON/OFF request | JSON |
+| `smartplug/commands/config` | Safety limits request | JSON |
+| `smartplug/waveform/request` | Fixed waveform capture request | JSON |
+
+
+## Expected status telemetry payload
+
+`smartplug/telemetry/status` should include the official `apparent_power` field in VA. This value is expected to come from the ADE7953 as true apparent power, including harmonic distortion.
+
+```json
+{
+  "vrms": 127.20,
+  "irms": 2.135,
+  "pf": 0.943,
+  "active_power": 255.80,
+  "reactive_power": 90.40,
+  "apparent_power": 271.30,
+  "frequency": 60.02,
+  "no_load": false,
+  "energy_wh": 12.30,
+  "relay": true,
+  "tmp_c": 31.40
+}
+```
+
+`Apparent Power` in the GUI uses `apparent_power` directly. The Power Triangle still draws its geometry from P and Q only, while the S label shows true apparent power from MQTT.
+
+## Waveform capture contract
+
+The fixed capture request is:
+
+```text
+512 samples @ 2400 Hz
+```
+
+Equivalent duration:
+
+```text
+512 / 2400 = 0.21333 s ≈ 213.33 ms
+```
+
+At 60 Hz, that is approximately:
+
+```text
+12.80 cycles
+```
+
+Preferred request payload:
+
+```json
+{"command":"REQUEST_WAVEFORM","sample_count":512,"sampling_rate_hz":2400,"source":"GUI"}
+```
+
+Preferred waveform response shape:
+
+```json
+{
+  "event_type": "WAVEFORM_CAPTURE",
+  "timestamp": "2026-06-05 14:32:18.123",
+  "sample_count": 512,
+  "duration_s": 0.213333,
+  "sampling_rate_hz": 2400,
+  "signals": {
+    "voltage_v": [0.0, 12.3, 24.5],
+    "current_a": [0.0, 0.12, 0.23]
+  }
+}
+```
+
+## Dashboard behavior
+
+### Startup and reconnection flow
+
+The GUI starts in the provisioning/reconnection phase and waits for `smartplug/telemetry/status`.
+
+Status telemetry acts as the device heartbeat. If it stops arriving for more than the GUI timeout, the interface returns to the provisioning/reconnection phase.
+
+### No-load handling
+
+When `no_load = true`, the GUI preserves the received voltage, frequency, energy, temperature, and relay state, but locally forces load-dependent values to zero for a clean display.
+
+### Power triangle animation
+
+The visual triangle geometry uses smoothed internal display values so the triangle changes size smoothly.
+
+The numeric labels for **P**, **Q**, and **S** use the latest target telemetry immediately. This keeps the values readable when measurements change rapidly.
+
+### Waveform and harmonic views
+
+The GUI:
+
+- plots instantaneous waveform samples,
+- computes FFT locally,
+- shows voltage and current spectra with separate Y axes,
+- computes THD for voltage and current,
+- computes fundamental V-I phase angle and time shift.
+
+## Window icon
+
+`smartplug_gui.py` loads the shared AYCE icon from `Software/assets/` using Tkinter's `iconbitmap(...)` and `iconphoto(...)`. This supports the visible GUI window/title-bar icon.
+
+The Windows taskbar can still show the Python icon when the GUI runs through `pythonw.exe`. This version intentionally does not include additional Win32/AppUserModelID taskbar-forcing code because that approach was not reliable enough in testing.
+
+## CSV export
+
+Available exports:
+
+- main metrics snapshot CSV,
+- waveform sample table CSV,
+- FFT harmonic table CSV.
+
+## Running manually for diagnostics
+
+Launcher-based runs are preferred. Manual runs may create `__pycache__` unless `-B` is used.
+
+### Run the GUI directly
+
+From `Software`:
+
+```cmd
+python -B telemetry\smartplug_gui.py
+```
+
+### Run the console MQTT tool
+
+From `Software`:
+
+```cmd
+python -B telemetry\mqtt_client.py --broker 192.168.137.1 --port 1883
+```
+
+Useful console commands include:
+
+```text
+relay on
+relay off
+set 135.0 5.0
+wave
+```
+
+## Broker configuration
+
+`mosquitto.conf` currently enables a simple local development broker:
 
 ```conf
-listener 1883
+listener 1883 0.0.0.0
 allow_anonymous true
 ```
 
-## Topic Layout
+## About `__pycache__`
 
-Use separate topic families for each direction and priority level.
+`__pycache__` folders can appear if Python scripts are executed manually without `-B`. They are safe to delete and are not included in the distributed zip.
 
-### Telemetry from ESP32 to PC
+## THD display note
 
-- `smartplug/telemetry` for continuous ADE7953 measurements
-
-### Alerts from ESP32 to PC
-
-- `smartplug/alerts` for critical protection events
-
-### Commands from PC to ESP32
-
-- `smartplug/cmd` for relay control and alert reset commands
-
-During development, the GUI can subscribe to `smartplug/#`, but the application logic should still separate telemetry, alerts, and commands internally.
-
-## Message Format Rules
-
-All payloads should be UTF-8 JSON objects.
-
-General rules:
-
-- Use snake_case keys.
-- Include a timestamp when the payload represents an event.
-- Keep field names stable once the GUI depends on them.
-- Use numeric types for measurements.
-- Use short string enums for states and causes.
-
-## 1. Continuous Telemetry Payload
-
-This is the normal stream used by the GUI for live readings and history.
-
-### Example
-
-```json
-{
-	"event_type": "HEARTBEAT",
-	"timestamp": "2026-05-11 18:45:02.123",
-	"metrics": {
-		"v_rms": 120.1,
-		"i_rms": 0.55,
-		"pf": 0.98,
-		"thd": 0.05,
-		"zero_cross_count": 60
-	},
-	"relay_state": 1
-}
-```
-
-### Meaning
-
-- `event_type`: Should be `HEARTBEAT` for periodic telemetry.
-- `timestamp`: Optional but recommended for chart alignment.
-- `metrics`: Nested ADE7953 data.
-- `relay_state`: `1` for ON, `0` for OFF.
-
-### GUI Behavior
-
-- Update live gauges from `metrics`.
-- Plot charts for `v_rms`, `i_rms`, `pf`, and `thd`.
-- Keep a rolling history buffer.
-- Show relay state clearly in the dashboard.
-
-## 2. Critical Alert Payload
-
-This is the high-priority path for protection events such as sag, overcurrent, or other lockout conditions.
-
-### Example
-
-```json
-{
-	"event_type": "CRITICAL_PROTECTION",
-	"cause": "OVERCURRENT_SAG",
-	"timestamp": "2026-05-11 18:45:02.123",
-	"data": {
-		"peak_value": 25.4,
-		"unit": "Amperes",
-		"duration_cycles": 12,
-		"v_rms_at_event": 95.2
-	},
-	"action_taken": "RELAY_OPEN",
-	"system_status": "LOCKED_AWAITING_ACK"
-}
-```
-
-### Meaning
-
-- `event_type`: Should be `CRITICAL_PROTECTION`.
-- `cause`: The trigger that caused the event.
-- `timestamp`: Time of the protection event.
-- `data`: Nested event details.
-- `action_taken`: Firmware response.
-- `system_status`: Current lockout or recovery state.
-
-### GUI Behavior
-
-- Show a high-priority alert panel.
-- Highlight the cause, action taken, and system status.
-- Lock or disable controls if the system is awaiting acknowledgment.
-- Store the event in a persistent event log.
-
-## 3. Command Payload
-
-The PC should also send commands to the ESP32 through a dedicated topic.
-
-### Topic
-
-- `smartplug/cmd`
-
-### Example Commands
-
-```json
-{
-	"command_type": "RELAY_ON",
-	"timestamp": "2026-05-11 18:45:10.000",
-	"source": "GUI"
-}
-```
-
-```json
-{
-	"command_type": "RELAY_OFF",
-	"timestamp": "2026-05-11 18:45:12.000",
-	"source": "GUI"
-}
-```
-
-```json
-{
-	"command_type": "RESET_ALERT",
-	"timestamp": "2026-05-11 18:45:15.000",
-	"source": "GUI"
-}
-```
-
-### Meaning
-
-- `command_type`: Action requested by the PC.
-- `timestamp`: Command time.
-- `source`: Usually `GUI`, but can also be `PC_TOOL` or `AUTO_RECOVERY`.
-
-### GUI Behavior
-
-- Publish commands only to `smartplug/cmd`.
-- Do not mix commands with telemetry or alerts.
-- Wait for a device confirmation topic or state update after issuing a command.
-
-## Recommended Internal Data Models
-
-The GUI and MQTT client should share a common parser layer with these models:
-
-### `TelemetrySample`
-
-- `event_type`
-- `timestamp`
-- `metrics`
-- `relay_state`
-
-### `CriticalEvent`
-
-- `event_type`
-- `cause`
-- `timestamp`
-- `data`
-- `action_taken`
-- `system_status`
-
-### `Esp32Command`
-
-- `command_type`
-- `timestamp`
-- `source`
-
-## Suggested Parsing Strategy
-
-1. Parse the MQTT payload as JSON.
-2. Check the topic first.
-3. If the topic is `smartplug/telemetry`, render live data and history.
-4. If the topic is `smartplug/alerts`, render the alert view.
-5. If the topic is `smartplug/cmd`, send or log a command.
-6. Use `event_type` and `command_type` for secondary routing.
-
-## Notes for ESP32 Firmware
-
-- Publish telemetry at a fixed interval.
-- Publish alerts immediately when a protection condition occurs.
-- Keep alert payloads high priority.
-- Use the command topic only for PC-to-ESP32 control.
-- Keep JSON key names stable so the GUI does not break.
-
-## Developer Checklist
-
-- [ ] MQTT broker reachable at `127.0.0.1:1883`
-- [ ] Anonymous connections enabled on the broker
-- [ ] GUI subscribes to `smartplug/telemetry` and `smartplug/alerts`
-- [ ] GUI publishes commands to `smartplug/cmd`
-- [ ] JSON payloads are parsed and validated
-- [ ] Critical alerts are visually separated from normal telemetry
-- [ ] Historical telemetry is stored for analysis and charts
-
-## Implementation Hint
-
-The current Python MQTT client is the right place to centralize parsing and dispatching. The GUI should build on top of that client instead of creating a second, unrelated data path.
+The waveform panel displays THD values computed from harmonics up to the 20th harmonic.

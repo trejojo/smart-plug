@@ -15,12 +15,12 @@ typedef esp_err_t (*module_mqtt_relay_command_handler_t)(const char *action, voi
 esp_err_t module_mqtt_init(void);
 
 /**
- * @brief Register a handler for MQTT safety-limit commands on topic aice/cmd
+ * @brief Register a handler for MQTT safety-limit commands on topic ayce/cmd
  */
 esp_err_t module_mqtt_set_safety_limits_handler(module_mqtt_safety_limits_handler_t handler, void *user_data);
 
 /**
- * @brief Register a handler for relay commands on topic aice/cmd
+ * @brief Register a handler for relay commands on topic ayce/cmd
  */
 esp_err_t module_mqtt_set_relay_command_handler(module_mqtt_relay_command_handler_t handler, void *user_data);
 
@@ -126,15 +126,16 @@ esp_err_t module_mqtt_publish_critical_protection(const char *cause,
  * @return ESP_OK on success, error code otherwise
  */
 esp_err_t module_mqtt_publish_status(float temperature_c,
-									 float vrms,
-									 float irms,
-									 float pf,
-									 float active_power,
-									 float reactive_power,
-									 float frequency,
-									 bool no_load,
-									 uint32_t energy_wh,
-									 bool relay_state);
+											 float vrms,
+											 float irms,
+											 float pf,
+											 float active_power,
+											 float reactive_power,
+											 float apparent_power,
+											 float frequency,
+											 bool no_load,
+											 float energy_wh,
+											 bool relay_state);
 
 /**
  * @brief Publish a waveform chunk payload
