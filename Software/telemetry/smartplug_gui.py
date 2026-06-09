@@ -46,118 +46,13 @@ SOFTWARE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ASSETS_DIR = os.path.join(SOFTWARE_DIR, "assets")
 AYCE_ICON_ICO = os.path.join(ASSETS_DIR, "ayce_logo.ico")
 AYCE_ICON_PNG = os.path.join(ASSETS_DIR, "ayce_logo.png")
-AYCE_APP_USER_MODEL_ID = "AYCE.SmartPlug.Dashboard"
-
-
-def configure_windows_app_identity() -> None:
-    """Set a Windows AppUserModelID before Tk creates the main window.
-
-    Windows can keep showing the generic Python icon in the taskbar when a
-    Tkinter application is launched through pythonw.exe. Setting an explicit
-    AppUserModelID early gives the GUI its own taskbar identity instead of
-    inheriting Python's.
-    """
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(AYCE_APP_USER_MODEL_ID)
-    except Exception:
-        pass
-
-
-def configure_windows_dpi_awareness() -> None:
-    """Keep the GUI visually close to the 100% Windows scale design.
-
-    Windows can bitmap-scale non-DPI-aware Tkinter apps at 125%/150%, which
-    makes the dashboard too large and can clip panels. Declaring the process as
-    DPI-aware prevents that OS-level enlargement. The Tk scaling value is fixed
-    later, after creating ``tk.Tk()``, to the 96 DPI / 100% baseline.
-    """
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-    except Exception:
-        return
-
-    # Prefer system-DPI awareness for predictable desktop-dashboard sizing.
-    # The calls can fail if another library already set DPI awareness; that is
-    # harmless, so failures are intentionally ignored.
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
-        return
-    except Exception:
-        pass
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
-
-
-def configure_tk_100_percent_scaling(root: tk.Tk) -> None:
-    """Normalize Tk font/widget scaling to the 100% Windows design baseline."""
-    try:
-        root.tk.call("tk", "scaling", TK_100_PERCENT_SCALING)
-    except tk.TclError:
-        pass
 
 if SOFTWARE_DIR not in sys.path:
     sys.path.insert(0, SOFTWARE_DIR)
 
 
-def _apply_windows_hicon(root: tk.Tk) -> None:
-    """Force the native Win32 window icons from the shared .ico file.
-
-    Tk's iconbitmap/iconphoto usually updates the title-bar icon, but Windows
-    may still keep Python's icon in the taskbar. Sending WM_SETICON directly to
-    the window handle makes the big/small icons explicit for the native window.
-    """
-    if sys.platform != "win32" or not os.path.exists(AYCE_ICON_ICO):
-        return
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        hwnd = wintypes.HWND(root.winfo_id())
-        user32 = ctypes.windll.user32
-
-        IMAGE_ICON = 1
-        LR_LOADFROMFILE = 0x0010
-        LR_DEFAULTSIZE = 0x0040
-        WM_SETICON = 0x0080
-        ICON_SMALL = 0
-        ICON_BIG = 1
-
-        load_image = user32.LoadImageW
-        load_image.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
-        load_image.restype = wintypes.HANDLE
-
-        send_message = user32.SendMessageW
-        send_message.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-        send_message.restype = wintypes.LPARAM
-
-        big_icon = load_image(None, AYCE_ICON_ICO, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
-        small_icon = load_image(None, AYCE_ICON_ICO, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
-        default_icon = load_image(None, AYCE_ICON_ICO, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE)
-
-        if big_icon:
-            send_message(hwnd, WM_SETICON, ICON_BIG, big_icon)
-        elif default_icon:
-            send_message(hwnd, WM_SETICON, ICON_BIG, default_icon)
-
-        if small_icon:
-            send_message(hwnd, WM_SETICON, ICON_SMALL, small_icon)
-        elif default_icon:
-            send_message(hwnd, WM_SETICON, ICON_SMALL, default_icon)
-
-        root._ayce_hicons = (big_icon, small_icon, default_icon)
-    except Exception:
-        pass
-
-
 def configure_window_icon(root: tk.Tk) -> None:
-    """Apply the shared AYCE icon to the Tk window and Windows taskbar."""
+    """Apply the shared AYCE icon to the Tk window/title bar."""
     try:
         if os.path.exists(AYCE_ICON_ICO):
             root.iconbitmap(default=AYCE_ICON_ICO)
@@ -170,9 +65,6 @@ def configure_window_icon(root: tk.Tk) -> None:
             root._ayce_icon_photo = icon_photo  # keep a reference alive
     except tk.TclError:
         pass
-
-    root.update_idletasks()
-    _apply_windows_hicon(root)
 
 
 from mqtt_client import (
@@ -282,19 +174,13 @@ class TelemetrySample:
     pf: float = 0.0
     active_power: float = 0.0
     reactive_power: float = 0.0
+    apparent_power: float = 0.0
     frequency: float = NOMINAL_FREQ_HZ
     no_load: bool = False
     energy_wh: float = 0.0
     relay: bool = False
     tmp_c: float = 0.0
     timestamp: str = ""
-
-    @property
-    def apparent_power_va(self) -> float:
-        # Current team decision: display apparent power from the P-Q triangle.
-        # S = sqrt(P^2 + Q^2), using active and reactive power delivered by the
-        # metering path instead of Vrms*Irms.
-        return math.sqrt(max(0.0, self.active_power * self.active_power + self.reactive_power * self.reactive_power))
 
     @property
     def current_percent_nominal(self) -> float:
@@ -343,6 +229,14 @@ class WaveformPacket:
 
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+def display_timestamp_seconds(timestamp: str) -> str:
+    """Return a compact timestamp for the waveform header."""
+    value = str(timestamp or "").strip().replace("T", " ")
+    if "." in value:
+        value = value.split(".", 1)[0]
+    return value or now_str().split(".", 1)[0]
 
 
 def clamp(value: float, min_value: float, max_value: float) -> float:
@@ -515,11 +409,19 @@ def phase_note_from_angle(phase_angle_deg: float, deadband_deg: float = 2.0) -> 
 
 
 def displacement_metrics_from_pq(active_power_w: float, reactive_power_var: float) -> Tuple[float, float, float]:
-    """Return apparent power, displacement PF and phi angle from P and Q."""
+    """Return P-Q triangle apparent power, signed displacement PF and phi angle.
+
+    The sign convention follows the load type: positive for inductive Q,
+    negative for capacitive Q, and positive/normal for nearly resistive loads.
+    """
     p = safe_float(active_power_w)
     q = safe_float(reactive_power_var)
     s = math.sqrt(max(0.0, p * p + q * q))
-    disp_pf = p / s if s > 1e-12 else 0.0
+    if s > 1e-12:
+        disp_pf_mag = abs(p) / s
+        disp_pf = -disp_pf_mag if q < -1.0 else disp_pf_mag
+    else:
+        disp_pf = 0.0
     phi_deg = math.degrees(math.atan2(q, p)) if (abs(p) > 1e-12 or abs(q) > 1e-12) else 0.0
     return s, disp_pf, phi_deg
 
@@ -628,6 +530,7 @@ class MessageParser:
             pf=safe_float(data.get("pf", data.get("power_factor"))),
             active_power=safe_float(data.get("active_power", data.get("power_w", data.get("power")))),
             reactive_power=safe_float(data.get("reactive_power", data.get("reactive_power_var"))),
+            apparent_power=safe_float(data.get("apparent_power")),
             frequency=safe_float(data.get("frequency", data.get("frequency_hz")), NOMINAL_FREQ_HZ),
             no_load=bool_from_any(data.get("no_load")),
             energy_wh=safe_float(data.get("energy_wh", data.get("energy"))),
@@ -644,6 +547,7 @@ class MessageParser:
             sample.pf = 0.0
             sample.active_power = 0.0
             sample.reactive_power = 0.0
+            sample.apparent_power = 0.0
 
         return sample
 
@@ -993,8 +897,8 @@ class DashboardFrame(tk.Frame):
         self.card_i = Card(cards_frame, "Current", "--", "A RMS", f"Nominal limit: {NOMINAL_CURRENT_ARMS:.0f} A RMS", Theme.PURPLE)
         self.card_p = Card(cards_frame, "Active Power", "--", "W", "Real power delivered", Theme.GOOD)
         self.card_q = Card(cards_frame, "Reactive Power", "--", "var", "Reactive component", Theme.ACCENT)
-        self.card_s = Card(cards_frame, "Apparent Power", "--", "VA", "√(P² + Q²)", Theme.PURPLE)
-        self.card_pf = Card(cards_frame, "Power Factor", "--", "", "True PF, including harmonic distortion", Theme.WARN)
+        self.card_s = Card(cards_frame, "Apparent Power", "--", "VA", "True apparent power, including harmonics", Theme.PURPLE)
+        self.card_pf = Card(cards_frame, "Power Factor", "--", "", "True PF, includes harmonics", Theme.WARN)
         self.card_f = Card(cards_frame, "Frequency", "--", "Hz", "Mexico grid: 60 Hz", Theme.ACCENT_2)
         self.card_e = Card(cards_frame, "Active Energy", "--", "Wh", "Accumulated", Theme.PINK)
         self.card_t = Card(cards_frame, "Temperature", "--", "°C", "Internal / board temperature", Theme.WARN)
@@ -1011,24 +915,25 @@ class DashboardFrame(tk.Frame):
         self.current_telemetry = sample
         v_accent = Theme.GOOD if 114 <= sample.vrms <= 140 else Theme.WARN
         i_accent = Theme.GOOD if sample.irms <= NOMINAL_CURRENT_ARMS else Theme.WARN
-        pf_accent = Theme.GOOD if sample.pf >= 0.90 else Theme.WARN if sample.pf >= 0.75 else Theme.BAD
+        pf_mag = abs(sample.pf)
+        pf_accent = Theme.GOOD if pf_mag >= 0.90 else Theme.WARN if pf_mag >= 0.75 else Theme.BAD
         q_accent = Theme.WARN if sample.reactive_power > 1.0 else Theme.ACCENT if sample.reactive_power < -1.0 else Theme.SUBTLE
         q_subtitle = "Inductive (positive)" if sample.reactive_power > 1.0 else "Capacitive (negative)" if sample.reactive_power < -1.0 else "Nearly resistive"
 
-        self.card_v.set(f"{sample.vrms:.1f}", "V RMS", f"Δ vs 127 V: {sample.vrms - NOMINAL_VRMS:+.1f} V", v_accent)
+        self.card_v.set(f"{sample.vrms:.2f}", "V RMS", f"Δ vs 127 V: {sample.vrms - NOMINAL_VRMS:+.2f} V", v_accent)
         self.card_i.set(f"{sample.irms:.3f}", "A RMS", f"{sample.current_percent_nominal:.0f}% of 5 A RMS nominal limit", i_accent)
-        self.card_p.set(f"{sample.active_power:.1f}", "W", "Real power delivered", Theme.GOOD)
-        self.card_q.set(f"{sample.reactive_power:.1f}", "var", q_subtitle, q_accent)
-        self.card_s.set(f"{sample.apparent_power_va:.1f}", "VA", "Calculated as √(P² + Q²)", Theme.PURPLE)
-        self.card_pf.set(f"{sample.pf:.3f}", "", "True PF, including harmonic distortion", pf_accent)
+        self.card_p.set(f"{sample.active_power:.2f}", "W", "Real power delivered", Theme.GOOD)
+        self.card_q.set(f"{sample.reactive_power:.2f}", "var", q_subtitle, q_accent)
+        self.card_s.set(f"{sample.apparent_power:.2f}", "VA", "True apparent power, including harmonics", Theme.PURPLE)
+        self.card_pf.set(f"{sample.pf:.3f}", "", "True PF, includes harmonics", pf_accent)
         self.card_f.set(f"{sample.frequency:.2f}", "Hz", f"Δ vs 60 Hz: {sample.frequency - NOMINAL_FREQ_HZ:+.2f} Hz")
 
         if sample.energy_wh >= 1000.0:
-            self.card_e.set(f"{sample.energy_wh / 1000.0:.4f}", "kWh", "Accumulated")
+            self.card_e.set(f"{sample.energy_wh / 1000.0:.2f}", "kWh", "Accumulated")
         else:
             self.card_e.set(f"{sample.energy_wh:.2f}", "Wh", "Accumulated")
 
-        self.card_t.set(f"{sample.tmp_c:.1f}", "°C")
+        self.card_t.set(f"{sample.tmp_c:.2f}", "°C")
         if sample.no_load:
             self.card_load.set("NO LOAD", "", "Relay may be open or current is near zero", Theme.SUBTLE)
         else:
@@ -1203,11 +1108,13 @@ class PowerTrianglePanel(tk.Frame):
         self._display_q: Optional[float] = None
         self._target_p: float = 0.0
         self._target_q: float = 0.0
+        self._target_s: float = 0.0
         self._animation_active: bool = False
 
     def update_triangle(self, sample: TelemetrySample) -> None:
         self._target_p = sample.active_power
         self._target_q = sample.reactive_power
+        self._target_s = sample.apparent_power
         load_type = load_type_from_reactive_power(sample.reactive_power)
         self.load_badge.configure(text=load_type, fg=Theme.WARN if sample.reactive_power > 1.0 else Theme.ACCENT if sample.reactive_power < -1.0 else Theme.GOOD)
         if self._display_p is None:
@@ -1253,7 +1160,8 @@ class PowerTrianglePanel(tk.Frame):
         Q = self._display_q if self._display_q is not None else 0.0
         value_p = self._target_p
         value_q = self._target_q
-        value_s, value_disp_pf, value_phi_deg = displacement_metrics_from_pq(value_p, value_q)
+        value_s = self._target_s
+        _, value_disp_pf, value_phi_deg = displacement_metrics_from_pq(value_p, value_q)
         abs_p = abs(P)
         abs_q = abs(Q)
 
@@ -1286,21 +1194,21 @@ class PowerTrianglePanel(tk.Frame):
             c.create_line(x2, base_y, x2, yq, fill=Theme.ACCENT, width=4, arrow="last")
             c.create_line(origin_x, base_y, x2, yq, fill=Theme.PURPLE, width=4, arrow="last")
 
-            c.create_text(min(axis_right - 115, x2 - 64), base_y - 18, text=f"P={value_p:.1f} W", fill=Theme.GOOD,
+            c.create_text(min(axis_right - 115, x2 - 64), base_y - 18, text=f"P={value_p:.2f} W", fill=Theme.GOOD,
                           font=("Segoe UI", 9, "bold"))
             q_anchor = "w" if x2 < w - 120 else "e"
             q_x = x2 + 20 if q_anchor == "w" else x2 - 8
-            c.create_text(q_x, (base_y + yq) / 2, anchor=q_anchor, text=f"Q={value_q:.1f} var", fill=Theme.ACCENT,
+            c.create_text(q_x, (base_y + yq) / 2, anchor=q_anchor, text=f"Q={value_q:.2f} var", fill=Theme.ACCENT,
                           font=("Segoe UI", 9, "bold"))
 
-            s_text = f"S={value_s:.1f} VA"
+            s_text = f"S={value_s:.2f} VA"
             s_x = origin_x + 0.52 * (x2 - origin_x)
             s_y = base_y + 0.52 * (yq - base_y)
             s_box_half_w = max(46, min(76, 4 * len(s_text) + 14))
             c.create_rectangle(s_x - s_box_half_w, s_y - 14, s_x + s_box_half_w, s_y + 14, fill=Theme.PANEL, outline=Theme.PURPLE)
             c.create_text(s_x, s_y, text=s_text, fill=Theme.PURPLE, font=("Segoe UI", 9, "bold"))
 
-        self.summary.configure(text=f"Displacement PF={value_disp_pf:.3f} · φ={value_phi_deg:+.1f}° · From latest P, Q, S · Ignores harmonic distortion")
+        self.summary.configure(text=f"Triangle geometry uses P and Q only. S is true apparent power, including harmonics. Displacement PF={value_disp_pf:.3f} · φ={value_phi_deg:+.1f}°")
 
 
 class MiniMetric(tk.Frame):
@@ -1332,8 +1240,9 @@ class WaveformAnalysisPanel(tk.Frame):
                  font=("Segoe UI", 14, "bold")).pack(side="left")
         controls = tk.Frame(header, bg=Theme.PANEL)
         controls.pack(side="right")
-        tk.Label(controls, text=f"{WAVEFORM_SAMPLE_COUNT} samples · ~{1000.0 * WAVEFORM_CAPTURE_SECONDS:.2f} ms", bg=Theme.PANEL, fg=Theme.MUTED,
-                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 8))
+        self.capture_info_label = tk.Label(controls, text="Shown capture: --", bg=Theme.PANEL, fg=Theme.MUTED,
+                                           font=("Segoe UI", 9, "bold"))
+        self.capture_info_label.pack(side="left", padx=(0, 8))
         ttk.Combobox(controls, textvariable=self.signal_var, values=["Both", "Voltage", "Current"],
                      state="readonly", width=10).pack(side="left", padx=(0, 8))
         self.signal_var.trace_add("write", lambda *_: (self.draw_waveform(), self.draw_fft()))
@@ -1470,7 +1379,7 @@ class WaveformAnalysisPanel(tk.Frame):
             else:
                 ms = 1000.0 * self.packet.duration_s
                 cycles = self.packet.duration_s * self.packet.fundamental_hz
-                self.status_label.configure(text=f"Waveform capture received: {len(self.packet.voltage_samples)} samples · {ms:.2f} ms · ~{cycles:.2f} cycles at {self.packet.fundamental_hz:.0f} Hz.", fg=Theme.GOOD)
+                self.status_label.configure(text=f"Waveform capture received: {len(self.packet.voltage_samples)} samples · {ms:.2f} ms · ~{cycles:.2f} cycles at {self.packet.fundamental_hz:.0f} Hz. THD values include harmonics up to the 20th.", fg=Theme.GOOD)
 
     def update_packet(self, packet: WaveformPacket) -> None:
         self.packet = packet
@@ -1538,13 +1447,14 @@ class WaveformAnalysisPanel(tk.Frame):
                 y = pad_t + frac * plot_h
                 value = ymax - frac * span
                 c.create_line(pad_l, y, pad_l + plot_w, y, fill="#24324a")
+                tick_format = ".3f" if "Current" in unit_label else ".2f"
                 if side == "left":
                     c.create_line(pad_l - 5, y, pad_l, y, fill=Theme.MUTED)
-                    c.create_text(pad_l - 8, y, anchor="e", text=f"{value:.2f}", fill=color, font=("Segoe UI", 7))
+                    c.create_text(pad_l - 8, y, anchor="e", text=f"{value:{tick_format}}", fill=color, font=("Segoe UI", 7))
                 else:
                     x_axis = pad_l + plot_w
                     c.create_line(x_axis, y, x_axis + 5, y, fill=Theme.MUTED)
-                    c.create_text(x_axis + 8, y, anchor="w", text=f"{value:.2f}", fill=color, font=("Segoe UI", 7))
+                    c.create_text(x_axis + 8, y, anchor="w", text=f"{value:{tick_format}}", fill=color, font=("Segoe UI", 7))
             if side == "left":
                 c.create_text(18, pad_t + plot_h / 2, text=unit_label, angle=90, fill=color, font=("Segoe UI", 8, "bold"))
             else:
@@ -2284,20 +2194,20 @@ class SmartPlugApp:
         if not filename:
             return
 
-        s_va, disp_pf, phi_deg = displacement_metrics_from_pq(sample.active_power, sample.reactive_power)
+        _, disp_pf, phi_deg = displacement_metrics_from_pq(sample.active_power, sample.reactive_power)
         save_ts = now_str()
         load_type = load_type_from_reactive_power(sample.reactive_power)
         with open(filename, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "save_timestamp", "telemetry_timestamp", "vrms", "irms", "true_pf_including_thd",
-                "active_power_w", "reactive_power_var", "apparent_power_va", "frequency_hz",
+                "active_power_w", "reactive_power_var", "true_apparent_power_va", "frequency_hz",
                 "energy_wh", "temperature_c", "relay", "no_load", "load_type",
                 "displacement_pf_from_pq", "phase_angle_deg_from_pq",
             ])
             writer.writerow([
                 save_ts, sample.timestamp, sample.vrms, sample.irms, sample.pf,
-                sample.active_power, sample.reactive_power, s_va, sample.frequency,
+                sample.active_power, sample.reactive_power, sample.apparent_power, sample.frequency,
                 sample.energy_wh, sample.tmp_c, sample.relay, sample.no_load, load_type,
                 disp_pf, phi_deg,
             ])
@@ -2313,7 +2223,6 @@ class SmartPlugApp:
 # =============================================================================
 
 if __name__ == "__main__":
-    configure_windows_app_identity()
     configure_windows_dpi_awareness()
     root = tk.Tk()
     configure_tk_100_percent_scaling(root)

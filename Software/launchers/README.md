@@ -132,6 +132,49 @@ To check manually:
 netstat -ano | findstr :1883
 ```
 
+
+### `Mosquitto closed immediately` after reboot
+
+This message means the launcher attempted to start Mosquitto, but the broker process closed immediately:
+
+```text
+Mosquitto closed immediately. Check whether port 1883 is already in use or whether mosquitto.conf is valid.
+```
+
+The usual cause is not the GUI or firmware. It is that Windows already started Mosquitto as a background service at boot, so port `1883` is already occupied.
+
+Check port `1883`:
+
+```cmd
+netstat -ano | findstr :1883
+```
+
+Then identify the process:
+
+```cmd
+tasklist /FI "PID eq <PID>"
+```
+
+If it is `mosquitto.exe`, the broker is already running. For the AYCE workflow, the cleanest setup is to make the Mosquitto service **Manual** instead of **Automatic**, so the AYCE launcher can start the visible broker console when needed.
+
+Using Windows Services:
+
+1. Press `Win + R`.
+2. Run `services.msc`.
+3. Find **Mosquitto Broker** or **mosquitto**.
+4. Click **Stop** if it is running.
+5. Open **Properties**.
+6. Set **Startup type** to **Manual**.
+
+Using Command Prompt as Administrator:
+
+```cmd
+sc stop mosquitto
+sc config mosquitto start= demand
+```
+
+Then close any old AYCE windows and open the **AYCE Smart Plug** desktop shortcut again.
+
 ### The broker console opens but the GUI does not
 
 Most likely a missing Python dependency. From the `Software` folder run:

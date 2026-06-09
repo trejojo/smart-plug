@@ -65,6 +65,28 @@ Main responsibilities:
 | `smartplug/commands/config` | Safety limits request | JSON |
 | `smartplug/waveform/request` | Fixed waveform capture request | JSON |
 
+## Expected status telemetry payload
+
+`smartplug/telemetry/status` should include the main dashboard measurements in one JSON payload:
+
+```json
+{
+  "vrms": 129.80,
+  "irms": 0.551,
+  "active_power": 36.60,
+  "reactive_power": -13.50,
+  "apparent_power": 70.25,
+  "pf": -0.512,
+  "frequency": 60.00,
+  "energy_wh": 67.09,
+  "tmp_c": 43.10,
+  "relay": true,
+  "no_load": false
+}
+```
+
+`apparent_power` is the official field for true apparent power in VA. It comes from the ADE7953 and includes the effect of harmonics. The GUI does not use alternate field names for this value.
+
 ## Waveform capture contract
 
 The fixed capture request is:
@@ -117,13 +139,21 @@ Status telemetry acts as the device heartbeat. If it stops arriving for more tha
 
 ### No-load handling
 
-When `no_load = true`, the GUI preserves the received voltage, frequency, energy, temperature, and relay state, but locally forces load-dependent values to zero for a clean display.
+When `no_load = true`, the GUI preserves the received voltage, frequency, energy, temperature, and relay state, but locally forces load-dependent values to zero for a clean display, including current, P, Q, S and true PF.
+
+### Apparent power and power factor
+
+The **Apparent Power** card displays `apparent_power` received from the ESP32/ADE7953. This is true apparent power and includes harmonic distortion.
+
+The **Power Factor** card displays the `pf` value received from telemetry. This is treated as true PF and includes harmonics.
 
 ### Power triangle animation
 
 The visual triangle geometry uses smoothed internal display values so the triangle changes size smoothly.
 
 The numeric labels for **P**, **Q**, and **S** use the latest target telemetry immediately. This keeps the values readable when measurements change rapidly.
+
+The triangle geometry uses **P** and **Q** only. The visual hypotenuse is based on `sqrt(P² + Q²)`, while the **S** label shows true apparent power from `apparent_power`, including harmonics. The displacement PF shown below the triangle is calculated locally from P and Q and is signed by load type: positive for inductive, negative for capacitive.
 
 ### Waveform and harmonic views
 
@@ -132,7 +162,7 @@ The GUI:
 - plots instantaneous waveform samples,
 - computes FFT locally,
 - shows voltage and current spectra with separate Y axes,
-- computes THD for voltage and current,
+- computes THD for voltage and current using harmonics up to the 20th,
 - computes fundamental V-I phase angle and time shift.
 
 ## CSV export
@@ -184,3 +214,33 @@ allow_anonymous true
 ## About `__pycache__`
 
 `__pycache__` folders can appear if Python scripts are executed manually without `-B`. They are safe to delete and are not included in the distributed zip.
+
+
+## Mosquitto service note
+
+If Windows starts Mosquitto automatically as a service, port `1883` may already be occupied before the AYCE launcher opens. In that case, a launcher that tries to start a second Mosquitto instance may show:
+
+```text
+Mosquitto closed immediately. Check whether port 1883 is already in use or whether mosquitto.conf is valid.
+```
+
+Recommended AYCE setup: set the Mosquitto Windows service to **Manual** and let the AYCE launcher start the broker when needed.
+
+Check the port:
+
+```cmd
+netstat -ano | findstr :1883
+```
+
+Check the process:
+
+```cmd
+tasklist /FI "PID eq <PID>"
+```
+
+Set the service to manual from an Administrator Command Prompt:
+
+```cmd
+sc stop mosquitto
+sc config mosquitto start= demand
+```

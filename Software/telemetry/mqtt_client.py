@@ -127,6 +127,7 @@ class TelemetrySample:
     pf: Optional[float] = None
     active_power: Optional[float] = None
     reactive_power: Optional[float] = None
+    apparent_power: Optional[float] = None
     frequency: Optional[float] = None
     no_load: Optional[bool] = None
     energy_wh: Optional[float] = None
@@ -143,6 +144,7 @@ class TelemetrySample:
             pf=_as_optional_float(_first_present(payload, "pf", "power_factor")),
             active_power=_as_optional_float(_first_present(payload, "active_power", "power_w", "power")),
             reactive_power=_as_optional_float(_first_present(payload, "reactive_power", "reactive_power_var")),
+            apparent_power=_as_optional_float(payload.get("apparent_power")),
             frequency=_as_optional_float(_first_present(payload, "frequency", "frequency_hz")),
             no_load=_as_optional_bool(payload.get("no_load")),
             energy_wh=_as_optional_float(_first_present(payload, "energy_wh", "energy")),
@@ -705,7 +707,7 @@ def format_console_message(parsed: ParsedMqttMessage) -> str:
             f"\n[{ts}] STATUS {parsed.topic} | "
             f"V={_fmt(d.vrms, ' Vrms')} | I={_fmt(d.irms, ' Arms', 3)} | "
             f"P={_fmt(d.active_power, ' W')} | Q={_fmt(d.reactive_power, ' var')} | "
-            f"PF={_fmt(d.pf, '', 3)} | f={_fmt(d.frequency, ' Hz')} | "
+            f"S={_fmt(d.apparent_power, ' VA')} | PF={_fmt(d.pf, '', 3)} | f={_fmt(d.frequency, ' Hz')} | "
             f"E={_fmt(d.energy_wh, ' Wh')} | relay={_on_off(d.relay)} | "
             f"no_load={no_load_text} | T={_fmt(d.tmp_c, ' °C')}"
         )

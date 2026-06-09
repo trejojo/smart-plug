@@ -149,6 +149,30 @@ Typical flow:
 5. The ESP32 connects to the hotspot and then to the local MQTT broker.
 6. Once status telemetry starts arriving, the GUI switches to the main dashboard.
 
+## Main telemetry payload
+
+The GUI expects `apparent_power` inside the existing `smartplug/telemetry/status` payload. No new MQTT topic is required.
+
+Expected fields include:
+
+```json
+{
+  "vrms": 129.80,
+  "irms": 0.551,
+  "active_power": 36.60,
+  "reactive_power": -13.50,
+  "apparent_power": 70.25,
+  "pf": -0.512,
+  "frequency": 60.00,
+  "energy_wh": 67.09,
+  "tmp_c": 43.10,
+  "relay": true,
+  "no_load": false
+}
+```
+
+`apparent_power` is the true apparent power in VA from the ADE7953 and includes harmonic distortion. The GUI does not calculate this value from `sqrt(P² + Q²)` anymore.
+
 ## Waveform capture contract
 
 The GUI and console tool use the fixed capture request:
@@ -163,9 +187,13 @@ This corresponds to approximately:
 213.33 ms, or about 12.80 cycles at 60 Hz
 ```
 
+The displayed THD values include harmonics up to the 20th.
+
 ## Power triangle behavior
 
 The power triangle shape is still animated smoothly for a better visual transition. The numeric labels for **P**, **Q**, and **S** update immediately from the latest telemetry so they stay readable even when the measurements change quickly.
+
+The triangle geometry still uses **P** and **Q** only. The visual hypotenuse is based on the P-Q geometry, while the displayed **S** label uses true apparent power from `apparent_power`, including harmonics.
 
 ## About `__pycache__`
 
@@ -220,6 +248,51 @@ If no broker is already running and the launcher must start Mosquitto itself, ch
 - `telemetry/mosquitto.conf` exists.
 
 If port `1883` is occupied by something other than `mosquitto.exe`, the launcher will stop and show an error.
+
+
+### Error after reboot: `Mosquitto closed immediately`
+
+If a launcher version tries to start Mosquitto and shows this message:
+
+```text
+Mosquitto closed immediately. Check whether port 1883 is already in use or whether mosquitto.conf is valid.
+```
+
+the most common cause is that **Mosquitto was already started automatically by Windows as a service** during boot. In that situation, port `1883` is already occupied, so a second Mosquitto instance cannot bind to the same port and closes immediately.
+
+Confirm the cause with:
+
+```cmd
+netstat -ano | findstr :1883
+```
+
+Then check which process owns the PID shown in the last column:
+
+```cmd
+tasklist /FI "PID eq <PID>"
+```
+
+If the process is `mosquitto.exe`, the broker is already running.
+
+Recommended AYCE setup: set the Mosquitto Windows service to **Manual** instead of **Automatic**. This lets the AYCE launcher control when the broker starts and stops.
+
+Option A, using Windows Services:
+
+1. Press `Win + R`.
+2. Run `services.msc`.
+3. Find **Mosquitto Broker** or **mosquitto**.
+4. Stop the service if it is running.
+5. Open **Properties**.
+6. Set **Startup type** to **Manual**.
+
+Option B, using Command Prompt as Administrator:
+
+```cmd
+sc stop mosquitto
+sc config mosquitto start= demand
+```
+
+After this, restart the AYCE desktop shortcut. If Mosquitto is not already running, the launcher will open the visible **AYCE MQTT Broker** console itself.
 
 ### AYCE does not connect
 
