@@ -687,7 +687,7 @@ esp_err_t module_mqtt_publish_status(float temperature_c,
              "\"pf\":%.3f,"
              "\"frequency\":%.2f,"
              "\"energy_wh\":%.2f,"
-             "\"tmp_c\":%.1f,"
+             "\"tmp_c\":%.2f,"
              "\"relay\":%s,"
              "\"no_load\":%s"
              "}",
