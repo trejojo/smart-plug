@@ -29,6 +29,33 @@ function Stop-ProcessTree {
     }
 }
 
+function Get-ListeningTcpPortOwner {
+    param([int]$Port)
+
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($conn) {
+            $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+            $name = if ($proc) { $proc.ProcessName } else { 'Unknown' }
+            return [pscustomobject]@{ Port = $Port; ProcessId = [int]$conn.OwningProcess; ProcessName = $name }
+        }
+    } catch {}
+
+    try {
+        $pattern = ":$Port\s+.*LISTENING\s+(\d+)"
+        $lines = netstat -ano -p TCP 2>$null | Select-String -Pattern $pattern
+        if ($lines) {
+            $line = $lines | Select-Object -First 1
+            $pid = [int]($line.Matches[0].Groups[1].Value)
+            $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+            $name = if ($proc) { $proc.ProcessName } else { 'Unknown' }
+            return [pscustomobject]@{ Port = $Port; ProcessId = $pid; ProcessName = $name }
+        }
+    } catch {}
+
+    return $null
+}
+
 function Resolve-PythonRuntime {
     param([string]$ProjectRoot)
 
@@ -69,6 +96,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $telemetryDir = Join-Path $projectRoot 'telemetry'
 $guiScript = Join-Path $telemetryDir 'smartplug_gui.py'
 $mosquittoConf = Join-Path $telemetryDir 'mosquitto.conf'
+$brokerPort = 1883
 
 if (-not (Test-Path $guiScript)) {
     Show-LauncherError "GUI script not found:`n$guiScript"
@@ -92,21 +120,48 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-$mosquittoExe = Resolve-MosquittoExe
-if (-not $mosquittoExe) {
-    Show-LauncherError "Mosquitto was not found. Install Mosquitto or add mosquitto.exe to PATH."
-    exit 1
-}
+$brokerProc = $null
+$brokerMode = 'none'
+$existingOwner = Get-ListeningTcpPortOwner -Port $brokerPort
 
-# The broker console is intentionally visible. /c is used instead of /k so that
-# if Mosquitto exits, the console closes and the supervisor can close the GUI too.
-$brokerCommand = 'title AYCE MQTT Broker && "{0}" -c "{1}" -v' -f $mosquittoExe, $mosquittoConf
-$brokerProc = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $brokerCommand) -WorkingDirectory $telemetryDir -PassThru
-Start-Sleep -Milliseconds 1200
+if ($existingOwner) {
+    if ($existingOwner.ProcessName -ieq 'mosquitto') {
+        # Mosquitto is already running, usually as a Windows service after reboot.
+        # Use it and do not start or stop an external broker.
+        $brokerMode = 'external'
+    } else {
+        Show-LauncherError "Port $brokerPort is already in use by '$($existingOwner.ProcessName)' (PID $($existingOwner.ProcessId)).`n`nAYCE needs this port for MQTT. Stop that process or change the broker configuration."
+        exit 1
+    }
+} else {
+    $mosquittoExe = Resolve-MosquittoExe
+    if (-not $mosquittoExe) {
+        Show-LauncherError "Mosquitto was not found. Install Mosquitto or add mosquitto.exe to PATH."
+        exit 1
+    }
 
-if ($brokerProc.HasExited) {
-    Show-LauncherError "Mosquitto closed immediately. Check whether port 1883 is already in use or whether mosquitto.conf is valid."
-    exit 1
+    # The broker console is intentionally visible. /c is used instead of /k so that
+    # if Mosquitto exits, the console closes and the supervisor can close the GUI too.
+    $brokerCommand = 'title AYCE MQTT Broker && "{0}" -c "{1}" -v' -f $mosquittoExe, $mosquittoConf
+    $brokerProc = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $brokerCommand) -WorkingDirectory $telemetryDir -PassThru
+    Start-Sleep -Milliseconds 1200
+
+    if ($brokerProc.HasExited) {
+        $ownerAfterStart = Get-ListeningTcpPortOwner -Port $brokerPort
+        if ($ownerAfterStart -and $ownerAfterStart.ProcessName -ieq 'mosquitto') {
+            # Another Mosquitto instance took or already had the port. Use it instead of failing.
+            $brokerMode = 'external'
+            $brokerProc = $null
+        } elseif ($ownerAfterStart) {
+            Show-LauncherError "Mosquitto closed immediately, and port $brokerPort is now used by '$($ownerAfterStart.ProcessName)' (PID $($ownerAfterStart.ProcessId))."
+            exit 1
+        } else {
+            Show-LauncherError "Mosquitto closed immediately. Check whether mosquitto.conf is valid or whether the broker service failed to start."
+            exit 1
+        }
+    } else {
+        $brokerMode = 'launched'
+    }
 }
 
 $guiProc = Start-Process -FilePath $pythonRuntime.Pythonw -ArgumentList @('-B', 'smartplug_gui.py') -WorkingDirectory $telemetryDir -PassThru
@@ -114,26 +169,28 @@ $guiProc = Start-Process -FilePath $pythonRuntime.Pythonw -ArgumentList @('-B', 
 try {
     while ($true) {
         Start-Sleep -Milliseconds 500
-        $brokerProc.Refresh()
         $guiProc.Refresh()
 
         if ($guiProc.HasExited) {
-            if (-not $brokerProc.HasExited) {
+            if ($brokerMode -eq 'launched' -and $brokerProc -and -not $brokerProc.HasExited) {
                 Stop-ProcessTree -ProcessId $brokerProc.Id
             }
             break
         }
 
-        if ($brokerProc.HasExited) {
-            if (-not $guiProc.HasExited) {
-                Stop-ProcessTree -ProcessId $guiProc.Id
+        if ($brokerMode -eq 'launched' -and $brokerProc) {
+            $brokerProc.Refresh()
+            if ($brokerProc.HasExited) {
+                if (-not $guiProc.HasExited) {
+                    Stop-ProcessTree -ProcessId $guiProc.Id
+                }
+                break
             }
-            break
         }
     }
 }
 finally {
-    if ($brokerProc -and -not $brokerProc.HasExited) {
+    if ($brokerMode -eq 'launched' -and $brokerProc -and -not $brokerProc.HasExited) {
         Stop-ProcessTree -ProcessId $brokerProc.Id
     }
     if ($guiProc -and -not $guiProc.HasExited) {

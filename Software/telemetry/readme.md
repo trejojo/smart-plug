@@ -10,7 +10,7 @@ This folder contains the AYCE live dashboard, the reusable MQTT client, and the 
 | `mqtt_client.py` | Reusable MQTT client and optional console tool for AYCE topics. |
 | `mosquitto.conf` | Local Mosquitto configuration used by the launcher. |
 
-The shared AYCE icon used by the GUI window/title bar is stored in:
+The shared AYCE icon used by the GUI is stored in:
 
 ```text
 Software/assets/ayce_logo.ico
@@ -31,7 +31,7 @@ Main responsibilities:
 - requests and plots waveform captures,
 - computes FFT, THD, phase angle, and time shift locally,
 - exports CSV snapshots and tables,
-- applies the AYCE icon to the GUI window/title bar.
+- applies the AYCE icon to the GUI window and Windows taskbar.
 
 ### `mqtt_client.py`
 
@@ -134,12 +134,6 @@ The GUI:
 - shows voltage and current spectra with separate Y axes,
 - computes THD for voltage and current,
 - computes fundamental V-I phase angle and time shift.
-
-## Window icon
-
-`smartplug_gui.py` loads the shared AYCE icon from `Software/assets/` using Tkinter's `iconbitmap(...)` and `iconphoto(...)`. This supports the visible GUI window/title-bar icon.
-
-The Windows taskbar can still show the Python icon when the GUI runs through `pythonw.exe`. This version intentionally does not include additional Win32/AppUserModelID taskbar-forcing code because that approach was not reliable enough in testing.
 
 ## CSV export
 

@@ -46,6 +46,25 @@ SOFTWARE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ASSETS_DIR = os.path.join(SOFTWARE_DIR, "assets")
 AYCE_ICON_ICO = os.path.join(ASSETS_DIR, "ayce_logo.ico")
 AYCE_ICON_PNG = os.path.join(ASSETS_DIR, "ayce_logo.png")
+AYCE_APP_USER_MODEL_ID = "AYCE.SmartPlug.Dashboard"
+
+
+def configure_windows_app_identity() -> None:
+    """Set a Windows AppUserModelID before Tk creates the main window.
+
+    Windows can keep showing the generic Python icon in the taskbar when a
+    Tkinter application is launched through pythonw.exe. Setting an explicit
+    AppUserModelID early gives the GUI its own taskbar identity instead of
+    inheriting Python's.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(AYCE_APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
 
 def configure_windows_dpi_awareness() -> None:
     """Keep the GUI visually close to the 100% Windows scale design.
@@ -87,13 +106,61 @@ if SOFTWARE_DIR not in sys.path:
     sys.path.insert(0, SOFTWARE_DIR)
 
 
+def _apply_windows_hicon(root: tk.Tk) -> None:
+    """Force the native Win32 window icons from the shared .ico file.
+
+    Tk's iconbitmap/iconphoto usually updates the title-bar icon, but Windows
+    may still keep Python's icon in the taskbar. Sending WM_SETICON directly to
+    the window handle makes the big/small icons explicit for the native window.
+    """
+    if sys.platform != "win32" or not os.path.exists(AYCE_ICON_ICO):
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        hwnd = wintypes.HWND(root.winfo_id())
+        user32 = ctypes.windll.user32
+
+        IMAGE_ICON = 1
+        LR_LOADFROMFILE = 0x0010
+        LR_DEFAULTSIZE = 0x0040
+        WM_SETICON = 0x0080
+        ICON_SMALL = 0
+        ICON_BIG = 1
+
+        load_image = user32.LoadImageW
+        load_image.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        load_image.restype = wintypes.HANDLE
+
+        send_message = user32.SendMessageW
+        send_message.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        send_message.restype = wintypes.LPARAM
+
+        big_icon = load_image(None, AYCE_ICON_ICO, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+        small_icon = load_image(None, AYCE_ICON_ICO, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+        default_icon = load_image(None, AYCE_ICON_ICO, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE)
+
+        if big_icon:
+            send_message(hwnd, WM_SETICON, ICON_BIG, big_icon)
+        elif default_icon:
+            send_message(hwnd, WM_SETICON, ICON_BIG, default_icon)
+
+        if small_icon:
+            send_message(hwnd, WM_SETICON, ICON_SMALL, small_icon)
+        elif default_icon:
+            send_message(hwnd, WM_SETICON, ICON_SMALL, default_icon)
+
+        root._ayce_hicons = (big_icon, small_icon, default_icon)
+    except Exception:
+        pass
+
+
 def configure_window_icon(root: tk.Tk) -> None:
-    """Apply the shared AYCE icon to the Tk window/title bar."""
+    """Apply the shared AYCE icon to the Tk window and Windows taskbar."""
     try:
         if os.path.exists(AYCE_ICON_ICO):
-            root.iconbitmap(AYCE_ICON_ICO)
             root.iconbitmap(default=AYCE_ICON_ICO)
-            root.wm_iconbitmap(AYCE_ICON_ICO)
     except tk.TclError:
         pass
     try:
@@ -103,6 +170,9 @@ def configure_window_icon(root: tk.Tk) -> None:
             root._ayce_icon_photo = icon_photo  # keep a reference alive
     except tk.TclError:
         pass
+
+    root.update_idletasks()
+    _apply_windows_hicon(root)
 
 
 from mqtt_client import (
@@ -1899,7 +1969,6 @@ class SmartPlugApp:
             # Some non-Windows Tk builds do not support the zoomed state.
             pass
 
-
         self.incoming_queue: "queue.Queue[Tuple[str, str]]" = queue.Queue()
         self.router = MessageRouter(self)
         self.data_source = MqttSmartPlugDataSource(self.incoming_queue, broker=DEFAULT_BROKER, port=DEFAULT_PORT)
@@ -2244,6 +2313,7 @@ class SmartPlugApp:
 # =============================================================================
 
 if __name__ == "__main__":
+    configure_windows_app_identity()
     configure_windows_dpi_awareness()
     root = tk.Tk()
     configure_tk_100_percent_scaling(root)
