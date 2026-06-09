@@ -1322,6 +1322,7 @@ void app_main(void)
                     measurement.power_factor_a,
                     measurement.active_power_a_w,
                     measurement.reactive_power_a_var,
+                    measurement.apparent_power_a_va,
                     measurement.line_frequency_hz,
                     ade7953_measurement_has_no_load(&measurement),
                     measurement.active_energy_a_wh_total,

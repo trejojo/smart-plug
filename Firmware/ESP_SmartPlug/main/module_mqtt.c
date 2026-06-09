@@ -656,45 +656,6 @@ esp_err_t module_mqtt_publish_temperature(float temp_celsius)
 }
 
 /**
- * @brief Publish energy readings
- */
-esp_err_t module_mqtt_publish_energy(float voltage_v, float current_a, float power_w, uint32_t energy_wh)
-{
-	if (!module_mqtt_is_connected()) {
-		return ESP_ERR_INVALID_STATE;
-	}
-
-	cJSON *root = cJSON_CreateObject();
-	if (root == NULL) {
-		return ESP_ERR_NO_MEM;
-	}
-
-	cJSON_AddNumberToObject(root, "voltage", voltage_v);
-	cJSON_AddNumberToObject(root, "current", current_a);
-	cJSON_AddNumberToObject(root, "power", power_w);
-	cJSON_AddNumberToObject(root, "energy", energy_wh);
-
-	char *payload = cJSON_PrintUnformatted(root);
-	if (payload == NULL) {
-		cJSON_Delete(root);
-		return ESP_ERR_NO_MEM;
-	}
-
-	int msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_TELEMETRY_ENERGY, payload, 0, 1, 0);
-
-	cJSON_free(payload);
-	cJSON_Delete(root);
-
-	if (msg_id == -1) {
-		ESP_LOGE(TAG, "Failed to publish energy readings");
-		return ESP_FAIL;
-	}
-
-	ESP_LOGI(TAG, "Published energy readings (msg_id: %d)", msg_id);
-	return ESP_OK;
-}
-
-/**
  * @brief Publish combined status
  */
 esp_err_t module_mqtt_publish_status(float temperature_c,
@@ -703,50 +664,54 @@ esp_err_t module_mqtt_publish_status(float temperature_c,
                                      float pf,
                                      float active_power,
                                      float reactive_power,
+                                     float apparent_power, 
                                      float frequency,
                                      bool no_load,
-									 float energy_wh,
+                                     float energy_wh,
                                      bool relay_state)
 {
-	if (!module_mqtt_is_connected()) {
-		return ESP_ERR_INVALID_STATE;
-	}
+    if (!module_mqtt_is_connected()) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
-	char payload[256];
-	snprintf(payload, sizeof(payload),
-		     "{"
-		     "\"vrms\":%.2f,"
-		     "\"irms\":%.3f,"
-		     "\"pf\":%.3f,"
-		     "\"active_power\":%.2f,"
-		     "\"reactive_power\":%.2f,"
-		     "\"frequency\":%.2f,"
-		     "\"no_load\":%s,"
-		     "\"energy_wh\":%.4f,"
-		     "\"relay\":%s,"
-		     "\"tmp_c\":%.2f"
-		     "}",
-		     vrms,
-		     irms,
-		     pf,
-		     active_power,
-		     reactive_power,
-		     frequency,
-		     no_load ? "true" : "false",
-		     energy_wh,
-		     relay_state ? "true" : "false",
-		     temperature_c);
+    char payload[256];
+    
+    // Updated to exactly match the requested JSON schema order and fields
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"vrms\":%.2f,"
+             "\"irms\":%.3f,"
+             "\"active_power\":%.2f,"
+             "\"reactive_power\":%.2f,"
+             "\"apparent_power\":%.2f,"
+             "\"pf\":%.3f,"
+             "\"frequency\":%.2f,"
+             "\"energy_wh\":%.2f,"
+             "\"tmp_c\":%.1f,"
+             "\"relay\":%s,"
+             "\"no_load\":%s"
+             "}",
+             vrms,
+             irms,
+             active_power,
+             reactive_power,
+             apparent_power, // <-- NEW VARIABLE
+             pf,
+             frequency,
+             energy_wh,
+             temperature_c,
+             relay_state ? "true" : "false",
+             no_load ? "true" : "false");
 
-	ESP_LOGI(TAG, "Publishing status: %s", payload);
-	int msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_TELEMETRY_STATUS, payload, 0, 1, 0);
+    ESP_LOGI(TAG, "Publishing status: %s", payload);
+    int msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_TELEMETRY_STATUS, payload, 0, 1, 0);
 
-	if (msg_id == -1) {
-		ESP_LOGE(TAG, "Failed to publish status");
-		return ESP_FAIL;
-	}
+    if (msg_id == -1) {
+        ESP_LOGE(TAG, "Failed to publish status");
+        return ESP_FAIL;
+    }
 
-	ESP_LOGI(TAG, "Published status (msg_id: %d)", msg_id);
-	return ESP_OK;
+    return ESP_OK;
 }
 
 /**
