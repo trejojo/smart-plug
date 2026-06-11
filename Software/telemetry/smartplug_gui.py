@@ -661,10 +661,12 @@ class MessageRouter:
         elif topic == SPECIAL_TOPIC_BLE_RESULT:
             self.app.on_ble_result(data)
         elif topic in STATUS_TOPICS:
+            self.app.critical_protection_active = False
             self.app.on_telemetry(MessageParser.parse_telemetry(data))
         elif topic in EVENT_TOPICS:
             event_type = data.get("event_type", "")
             if event_type == "CRITICAL_PROTECTION":
+                self.app.critical_protection_active = True
                 self.app.on_critical_event(MessageParser.parse_event(data))
             else:
                 self.app.log(f"Device event: {event_type}", level="info")
@@ -2001,16 +2003,15 @@ class SmartPlugApp:
             self.root.after(100, self._process_incoming_queue)
 
     def _check_device_heartbeat(self) -> None:
-        """Return to the provisioning/reconnection screen if device telemetry stops.
-
-        This watchdog intentionally does not depend on the MQTT client's
-        disconnect callback. The PC can remain connected to Mosquitto while the
-        ESP32 is powered off, rebooting or in BLE pairing mode. The device is
-        considered online only while fresh smartplug/telemetry/status packets
-        keep arriving.
-        """
+        """Return to the provisioning/reconnection screen if device telemetry stops."""
         try:
-            if self.phase == PHASE_DASHBOARD and not self.collecting_waveform and self.last_telemetry_monotonic is not None:
+            # Added: 'and not getattr(self, "critical_protection_active", False)'
+            # This makes the watchdog ignore the timeout if a critical event was flagged.
+            if (self.phase == PHASE_DASHBOARD 
+                and not self.collecting_waveform 
+                and not getattr(self, "critical_protection_active", False) 
+                and self.last_telemetry_monotonic is not None):
+                
                 elapsed_s = time.monotonic() - self.last_telemetry_monotonic
                 if elapsed_s > DEVICE_HEARTBEAT_TIMEOUT_S:
                     self.device_online = False
